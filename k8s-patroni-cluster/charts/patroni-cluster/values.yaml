@@ -1,0 +1,211 @@
+# Patroni PostgreSQL Cluster Configuration
+global:
+  storageClass: ""
+  namespace: patroni-cluster
+
+# PostgreSQL Configuration
+postgresql:
+  version: "16"
+  image:
+    repository: postgres
+    tag: "16-alpine"
+    pullPolicy: IfNotPresent
+  
+  # Database configuration
+  database: postgres
+  username: postgres
+  password: postgres123
+  replicationUsername: replicator
+  replicationPassword: replicator123
+  
+  # Patroni configuration
+  patroni:
+    version: "4.0.6"
+    image:
+      repository: patroni/patroni
+      tag: "4.0.6"
+      pullPolicy: IfNotPresent
+    
+    # Cluster settings
+    scope: postgres-cluster
+    ttl: 30
+    loopWait: 10
+    retryTimeout: 30
+    
+    # PostgreSQL parameters
+    parameters:
+      max_connections: 200
+      shared_buffers: 256MB
+      effective_cache_size: 1GB
+      maintenance_work_mem: 64MB
+      checkpoint_completion_target: 0.9
+      wal_buffers: 16MB
+      default_statistics_target: 100
+      random_page_cost: 1.1
+      effective_io_concurrency: 200
+      work_mem: 4MB
+      min_wal_size: 1GB
+      max_wal_size: 4GB
+      max_worker_processes: 8
+      max_parallel_workers_per_gather: 2
+      max_parallel_workers: 8
+      max_parallel_maintenance_workers: 2
+
+  # Resource configuration
+  resources:
+    limits:
+      cpu: 2
+      memory: 2Gi
+    requests:
+      cpu: 500m
+      memory: 1Gi
+  
+  # Storage configuration
+  persistence:
+    enabled: true
+    size: 20Gi
+    accessMode: ReadWriteOnce
+    annotations: {}
+
+  # Service configuration
+  service:
+    type: ClusterIP
+    port: 5432
+    annotations: {}
+
+# etcd Configuration
+etcd:
+  enabled: true
+  image:
+    repository: quay.io/coreos/etcd
+    tag: "v3.5.15"
+    pullPolicy: IfNotPresent
+  
+  replicas: 3
+  
+  # Resource configuration
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+  
+  # Storage configuration
+  persistence:
+    enabled: true
+    size: 8Gi
+    accessMode: ReadWriteOnce
+    annotations: {}
+  
+  # Service configuration
+  service:
+    type: ClusterIP
+    clientPort: 2379
+    peerPort: 2380
+
+# HAProxy Configuration
+haproxy:
+  enabled: true
+  image:
+    repository: haproxy
+    tag: "3.0-alpine"
+    pullPolicy: IfNotPresent
+  
+  replicas: 2
+  
+  # Resource configuration
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+  
+  # Service configuration
+  service:
+    type: LoadBalancer
+    ports:
+      primary: 5000
+      replica: 5001
+      all: 5002
+      stats: 7000
+    annotations: {}
+  
+  # HAProxy configuration
+  config:
+    maxconn: 1000
+    timeout:
+      connect: 30s
+      client: 60s
+      server: 60s
+    
+    # Stats configuration
+    stats:
+      enabled: true
+      username: admin
+      password: admin123
+      uri: /stats
+
+# Cluster Configuration
+cluster:
+  replicas: 3
+  name: patroni-cluster
+
+# Network Policy
+networkPolicy:
+  enabled: false
+
+# Pod Security Policy
+podSecurityPolicy:
+  enabled: false
+
+# Service Account
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+# Pod annotations
+podAnnotations: {}
+
+# Pod security context
+podSecurityContext:
+  fsGroup: 999
+
+# Security context
+securityContext:
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: false
+  runAsNonRoot: true
+  runAsUser: 999
+
+# Node selector
+nodeSelector: {}
+
+# Tolerations
+tolerations: []
+
+# Affinity
+affinity: {}
+
+# Monitoring
+monitoring:
+  enabled: false
+  serviceMonitor:
+    enabled: false
+    namespace: ""
+    interval: 30s
+    scrapeTimeout: 10s
+
+# Tests
+tests:
+  enabled: true
+  image:
+    repository: postgres
+    tag: "16-alpine"
+    pullPolicy: IfNotPresent

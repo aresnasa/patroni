@@ -1,0 +1,124 @@
+# Patroni PostgreSQL 高可用集群
+
+这个文件夹包含了完整的 Patroni PostgreSQL 高可用集群配置，整合了 Docker Compose 和 HAProxy 负载均衡。
+
+## 架构组件
+
+- **3 节点 etcd 集群**: 作为分布式配置存储 (DCS)
+- **3 节点 PostgreSQL 集群**: 使用 Patroni 管理的高可用 PostgreSQL 
+- **HAProxy 负载均衡器**: 提供连接路由和负载均衡
+
+## 快速启动
+
+1. 进入项目目录：
+```bash
+cd patroni-cluster
+```
+
+2. 启动整个集群：
+```bash
+docker-compose up -d
+```
+
+3. 查看集群状态：
+```bash
+docker-compose ps
+```
+
+## 服务访问
+
+### PostgreSQL 连接
+- **主库 (读写)**: `localhost:5000`
+- **副本 (只读)**: `localhost:5001` 
+- **所有节点**: `localhost:5002`
+
+### 管理界面
+- **HAProxy 统计**: http://localhost:7000
+- **Patroni REST API**:
+  - 节点1: http://localhost:8008
+  - 节点2: http://localhost:8009
+  - 节点3: http://localhost:8010
+
+### 数据库连接信息
+- **超级用户**: postgres / postgres123
+- **复制用户**: replicator / replicator123
+- **管理用户**: admin / admin123
+
+## 集群管理
+
+### 查看集群状态
+```bash
+# 通过 Patroni REST API
+curl http://localhost:8008/cluster
+
+# 或通过 patronictl (如果安装了)
+patronictl -c /path/to/patroni.yml list
+```
+
+### 手动故障转移
+```bash
+curl -s http://localhost:8008/failover -XPOST -d '{"leader":"patroni1","candidate":"patroni2"}'
+```
+
+### 停止集群
+```bash
+docker-compose down
+```
+
+### 完全清理 (包括数据)
+```bash
+docker-compose down -v
+```
+
+## 配置文件说明
+
+- `docker-compose.yml`: Docker Compose 配置
+- `haproxy.cfg`: HAProxy 负载均衡配置
+- `patroni.yml`: Patroni 配置模板
+- `entrypoint.sh`: 容器启动脚本
+
+## 监控和日志
+
+### 查看服务日志
+```bash
+# 查看所有服务日志
+docker-compose logs -f
+
+# 查看特定服务日志
+docker-compose logs -f patroni1
+docker-compose logs -f haproxy
+```
+
+### 健康检查
+```bash
+# 检查主库
+curl http://localhost:8008/primary
+
+# 检查副本
+curl http://localhost:8008/replica
+
+# 检查集群
+curl http://localhost:8008/cluster
+```
+
+## 故障排除
+
+### 常见问题
+
+1. **etcd 连接失败**: 确保 etcd 集群完全启动
+2. **PostgreSQL 启动失败**: 检查数据目录权限
+3. **HAProxy 连接失败**: 确认 Patroni 节点健康状态
+
+### 重新初始化集群
+```bash
+docker-compose down -v
+docker-compose up -d
+```
+
+## 生产环境注意事项
+
+1. 修改默认密码
+2. 配置适当的资源限制
+3. 设置数据持久化存储
+4. 配置网络安全策略
+5. 设置监控和告警

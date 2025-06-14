@@ -1,0 +1,317 @@
+{{- if .Values.consistencyCheck.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "patroni-cluster-tests.fullname" . }}-consistency-check
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "patroni-cluster-tests.labels" . | nindent 4 }}
+    app.kubernetes.io/component: consistency-check
+data:
+  consistency_check.py: |
+    #!/usr/bin/env python3
+    import psycopg2
+    import time
+    import json
+    import logging
+    import hashlib
+    from datetime import datetime
+    import signal
+    import sys
+    
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    logger = logging.getLogger(__name__)
+    
+    class ConsistencyChecker:
+        def __init__(self):
+            self.namespace = "{{ .Values.targetCluster.namespace }}"
+            self.cluster_name = "{{ .Values.targetCluster.name }}"
+            self.username = "{{ .Values.targetCluster.postgresql.username }}"
+            self.password = "{{ .Values.targetCluster.postgresql.password }}"
+            self.database = "{{ .Values.targetCluster.postgresql.database }}"
+            self.interval = {{ .Values.consistencyCheck.interval }}
+            self.running = True
+            
+            self.nodes = [
+                f"{self.cluster_name}-postgresql-0.{self.cluster_name}-postgresql-headless.{self.namespace}.svc.cluster.local",
+                f"{self.cluster_name}-postgresql-1.{self.cluster_name}-postgresql-headless.{self.namespace}.svc.cluster.local",
+                f"{self.cluster_name}-postgresql-2.{self.cluster_name}-postgresql-headless.{self.namespace}.svc.cluster.local"
+            ]
+            
+        def signal_handler(self, signum, frame):
+            logger.info("收到停止信号，正在关闭一致性检查...")
+            self.running = False
+            
+        def connect_to_node(self, host):
+            try:
+                conn = psycopg2.connect(
+                    host=host,
+                    port=5432,
+                    user=self.username,
+                    password=self.password,
+                    database=self.database,
+                    connect_timeout=10
+                )
+                return conn
+            except Exception as e:
+                logger.warning(f"连接到 {host} 失败: {e}")
+                return None
+                
+        def get_table_checksum(self, conn, table_name):
+            try:
+                with conn.cursor() as cur:
+                    # 获取表的行数和数据校验和
+                    cur.execute(f"""
+                        SELECT 
+                            COUNT(*) as row_count,
+                            COALESCE(MD5(string_agg(CAST(id AS TEXT) || '|' || COALESCE(sequence_id::TEXT, '') || '|' || COALESCE(data, '') || '|' || COALESCE(created_at::TEXT, ''), '' ORDER BY id)), '') as checksum
+                        FROM {table_name}
+                    """)
+                    result = cur.fetchone()
+                    return {
+                        'row_count': result[0] if result else 0,
+                        'checksum': result[1] if result and result[1] else '',
+                        'accessible': True
+                    }
+            except Exception as e:
+                logger.error(f"获取表 {table_name} 校验和失败: {e}")
+                return {
+                    'row_count': 0,
+                    'checksum': '',
+                    'accessible': False,
+                    'error': str(e)
+                }
+                
+        def get_sequence_info(self, conn, table_name):
+            try:
+                with conn.cursor() as cur:
+                    # 获取序列号范围和重复情况
+                    cur.execute(f"""
+                        SELECT 
+                            MIN(sequence_id) as min_seq,
+                            MAX(sequence_id) as max_seq,
+                            COUNT(DISTINCT sequence_id) as unique_count,
+                            COUNT(*) as total_count,
+                            COUNT(*) - COUNT(DISTINCT sequence_id) as duplicates
+                        FROM {table_name}
+                    """)
+                    result = cur.fetchone()
+                    if result:
+                        return {
+                            'min_sequence': result[0],
+                            'max_sequence': result[1],
+                            'unique_sequences': result[2],
+                            'total_records': result[3],
+                            'duplicate_sequences': result[4]
+                        }
+            except Exception as e:
+                logger.error(f"获取序列信息失败: {e}")
+            return {}
+            
+        def check_data_consistency(self):
+            results = {}
+            accessible_nodes = []
+            
+            logger.info("🔍 开始数据一致性检查...")
+            
+            # 检查每个节点
+            for i, node in enumerate(self.nodes):
+                node_name = f"postgresql-{i}"
+                logger.info(f"检查节点 {node_name} ({node})...")
+                
+                conn = self.connect_to_node(node)
+                if not conn:
+                    results[node_name] = {
+                        'accessible': False,
+                        'error': 'Connection failed'
+                    }
+                    continue
+                    
+                accessible_nodes.append(node_name)
+                
+                try:
+                    # 检查test_data表
+                    test_data_result = self.get_table_checksum(conn, 'test_data')
+                    sequence_info = self.get_sequence_info(conn, 'test_data')
+                    
+                    results[node_name] = {
+                        'accessible': True,
+                        'test_data': test_data_result,
+                        'sequence_info': sequence_info
+                    }
+                    
+                    logger.info(f"✅ {node_name}: {test_data_result['row_count']} 条记录, 校验和: {test_data_result['checksum'][:8]}...")
+                    
+                except Exception as e:
+                    results[node_name] = {
+                        'accessible': True,
+                        'error': str(e)
+                    }
+                    logger.error(f"❌ {node_name}: 检查失败 - {e}")
+                finally:
+                    conn.close()
+                    
+            # 分析一致性
+            return self.analyze_consistency(results, accessible_nodes)
+            
+        def analyze_consistency(self, results, accessible_nodes):
+            analysis = {
+                'timestamp': datetime.now().isoformat(),
+                'accessible_nodes': len(accessible_nodes),
+                'total_nodes': len(self.nodes),
+                'consistent': True,
+                'issues': [],
+                'node_details': results
+            }
+            
+            if len(accessible_nodes) < 2:
+                analysis['consistent'] = False
+                analysis['issues'].append("可访问节点不足2个，无法进行一致性比较")
+                return analysis
+                
+            # 比较数据一致性
+            checksums = {}
+            row_counts = {}
+            
+            for node in accessible_nodes:
+                if 'test_data' in results[node] and results[node]['test_data']['accessible']:
+                    test_data = results[node]['test_data']
+                    checksums[node] = test_data['checksum']
+                    row_counts[node] = test_data['row_count']
+                    
+            # 检查校验和一致性
+            unique_checksums = set(checksums.values())
+            if len(unique_checksums) > 1:
+                analysis['consistent'] = False
+                analysis['issues'].append(f"数据校验和不一致: {dict(checksums)}")
+                
+            # 检查行数一致性
+            unique_row_counts = set(row_counts.values())
+            if len(unique_row_counts) > 1:
+                analysis['consistent'] = False
+                analysis['issues'].append(f"行数不一致: {dict(row_counts)}")
+                
+            # 检查序列号问题
+            for node in accessible_nodes:
+                if 'sequence_info' in results[node]:
+                    seq_info = results[node]['sequence_info']
+                    if seq_info.get('duplicate_sequences', 0) > 0:
+                        analysis['issues'].append(f"{node}: 发现 {seq_info['duplicate_sequences']} 个重复序列号")
+                        
+            return analysis
+            
+        def print_consistency_report(self, analysis):
+            print("\n" + "="*80)
+            print(f"📊 数据一致性检查报告 - {analysis['timestamp']}")
+            print("="*80)
+            
+            # 总体状态
+            status_icon = "✅" if analysis['consistent'] else "❌"
+            print(f"{status_icon} 一致性状态: {'通过' if analysis['consistent'] else '失败'}")
+            print(f"📈 可访问节点: {analysis['accessible_nodes']}/{analysis['total_nodes']}")
+            
+            # 节点详情
+            print(f"\n📋 节点详细信息:")
+            for node, details in analysis['node_details'].items():
+                if details.get('accessible', False):
+                    if 'test_data' in details and details['test_data']['accessible']:
+                        test_data = details['test_data']
+                        seq_info = details.get('sequence_info', {})
+                        
+                        print(f"   ✅ {node}:")
+                        print(f"      记录数: {test_data['row_count']}")
+                        print(f"      校验和: {test_data['checksum'][:16]}...")
+                        
+                        if seq_info:
+                            print(f"      序列范围: {seq_info.get('min_sequence', 'N/A')} - {seq_info.get('max_sequence', 'N/A')}")
+                            print(f"      唯一序列: {seq_info.get('unique_sequences', 'N/A')}")
+                            if seq_info.get('duplicate_sequences', 0) > 0:
+                                print(f"      ⚠️ 重复序列: {seq_info['duplicate_sequences']}")
+                    else:
+                        print(f"   ❌ {node}: 数据访问失败")
+                else:
+                    print(f"   ❌ {node}: 节点不可访问")
+                    
+            # 问题列表
+            if analysis['issues']:
+                print(f"\n⚠️ 发现的问题:")
+                for i, issue in enumerate(analysis['issues'], 1):
+                    print(f"   {i}. {issue}")
+            else:
+                print(f"\n✅ 未发现一致性问题")
+                
+            print("="*80)
+            
+        def run(self):
+            signal.signal(signal.SIGTERM, self.signal_handler)
+            signal.signal(signal.SIGINT, self.signal_handler)
+            
+            logger.info("🔍 开始一致性检查监控...")
+            logger.info(f"目标集群: {self.cluster_name} (namespace: {self.namespace})")
+            logger.info(f"检查间隔: {self.interval}秒")
+            
+            while self.running:
+                try:
+                    analysis = self.check_data_consistency()
+                    self.print_consistency_report(analysis)
+                    
+                    # 保存检查结果
+                    with open('/tmp/consistency_check_results.json', 'w') as f:
+                        json.dump(analysis, f, indent=2)
+                        
+                except Exception as e:
+                    logger.error(f"一致性检查过程中发生错误: {e}")
+                    
+                time.sleep(self.interval)
+                
+            logger.info("🏁 一致性检查结束")
+            
+    if __name__ == "__main__":
+        checker = ConsistencyChecker()
+        checker.run()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "patroni-cluster-tests.fullname" . }}-consistency-check
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "patroni-cluster-tests.labels" . | nindent 4 }}
+    app.kubernetes.io/component: consistency-check
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "patroni-cluster-tests.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: consistency-check
+  template:
+    metadata:
+      labels:
+        {{- include "patroni-cluster-tests.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: consistency-check
+    spec:
+      serviceAccountName: {{ include "patroni-cluster-tests.serviceAccountName" . }}
+      containers:
+      - name: consistency-check
+        image: "{{ .Values.consistencyCheck.image.repository }}:{{ .Values.consistencyCheck.image.tag }}"
+        imagePullPolicy: {{ .Values.consistencyCheck.image.pullPolicy }}
+        command:
+        - /bin/sh
+        - -c
+        - |
+          apk add --no-cache postgresql-client python3-dev gcc musl-dev
+          pip install psycopg2-binary
+          python3 /scripts/consistency_check.py
+        volumeMounts:
+        - name: script
+          mountPath: /scripts
+        resources:
+          {{- toYaml .Values.consistencyCheck.resources | nindent 10 }}
+        securityContext:
+          {{- toYaml .Values.securityContext | nindent 10 }}
+      volumes:
+      - name: script
+        configMap:
+          name: {{ include "patroni-cluster-tests.fullname" . }}-consistency-check
+          defaultMode: 0755
+{{- end }}

@@ -1,0 +1,77 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "patroni-cluster.fullname" . }}-config
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "patroni-cluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgresql
+data:
+  patroni.yml: |
+    scope: {{ .Values.postgresql.patroni.scope }}
+    name: ${POD_NAME}
+    namespace: /{{ .Values.postgresql.patroni.scope }}/
+    
+    restapi:
+      listen: 0.0.0.0:8008
+      connect_address: ${POD_IP}:8008
+    
+    etcd:
+      hosts: {{ include "patroni-cluster.fullname" . }}-etcd.{{ .Values.global.namespace }}.svc.cluster.local:2379
+    
+    bootstrap:
+      dcs:
+        ttl: {{ .Values.postgresql.patroni.ttl }}
+        loop_wait: {{ .Values.postgresql.patroni.loopWait }}
+        retry_timeout: {{ .Values.postgresql.patroni.retryTimeout }}
+        postgresql:
+          use_pg_rewind: true
+          use_slots: true
+          parameters:
+            {{- range $key, $value := .Values.postgresql.patroni.parameters }}
+            {{ $key }}: {{ $value | quote }}
+            {{- end }}
+          pg_hba:
+            - host replication {{ .Values.postgresql.replicationUsername }} 0.0.0.0/0 md5
+            - host all all 0.0.0.0/0 md5
+      initdb:
+        - encoding: UTF8
+        - data-checksums
+      users:
+        {{ .Values.postgresql.username }}:
+          password: {{ .Values.postgresql.password }}
+          options:
+            - createrole
+            - createdb
+        {{ .Values.postgresql.replicationUsername }}:
+          password: {{ .Values.postgresql.replicationPassword }}
+          options:
+            - replication
+    
+    postgresql:
+      listen: 0.0.0.0:5432
+      connect_address: ${POD_IP}:5432
+      data_dir: /var/lib/postgresql/data/pgdata
+      bin_dir: /usr/local/bin
+      pgpass: /tmp/pgpass
+      authentication:
+        replication:
+          username: {{ .Values.postgresql.replicationUsername }}
+          password: {{ .Values.postgresql.replicationPassword }}
+        superuser:
+          username: {{ .Values.postgresql.username }}
+          password: {{ .Values.postgresql.password }}
+        rewind:
+          username: {{ .Values.postgresql.replicationUsername }}
+          password: {{ .Values.postgresql.replicationPassword }}
+      parameters:
+        unix_socket_directories: /var/run/postgresql
+        {{- range $key, $value := .Values.postgresql.patroni.parameters }}
+        {{ $key }}: {{ $value | quote }}
+        {{- end }}
+    
+    tags:
+      nofailover: false
+      noloadbalance: false
+      clonefrom: false
+      nosync: false

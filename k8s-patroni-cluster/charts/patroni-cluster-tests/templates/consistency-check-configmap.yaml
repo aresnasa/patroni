@@ -1,0 +1,264 @@
+{{- if .Values.consistencyCheck.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "patroni-cluster-tests.fullname" . }}-consistency-check
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "patroni-cluster-tests.labels" . | nindent 4 }}
+    app.kubernetes.io/component: consistency-check
+data:
+  consistency_check.py: |
+    #!/usr/bin/env python3
+    import psycopg2
+    import time
+    import logging
+    import sys
+    import signal
+    import hashlib
+    from datetime import datetime
+    import threading
+    import json
+    
+    # 配置日志
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
+    logger = logging.getLogger(__name__)
+    
+    class PatroniConsistencyChecker:
+        def __init__(self):
+            self.namespace = "{{ .Values.targetCluster.namespace }}"
+            self.cluster_name = "{{ .Values.targetCluster.name }}"
+            self.interval = {{ .Values.consistencyCheck.interval }}
+            self.username = "{{ .Values.targetCluster.postgresql.username }}"
+            self.password = "{{ .Values.targetCluster.postgresql.password }}"
+            self.database = "{{ .Values.targetCluster.postgresql.database }}"
+            
+            self.start_time = datetime.now()
+            self.stop_event = threading.Event()
+            self.consistency_reports = []
+            
+            # 注册信号处理器
+            signal.signal(signal.SIGTERM, self._signal_handler)
+            signal.signal(signal.SIGINT, self._signal_handler)
+        
+        def _signal_handler(self, signum, frame):
+            logger.info(f"收到信号 {signum}，正在优雅关闭...")
+            self.stop_event.set()
+        
+        def get_connection(self, node_id):
+            """获取特定节点的数据库连接"""
+            try:
+                conn = psycopg2.connect(
+                    host=f"{self.cluster_name}-postgresql-{node_id}.{self.cluster_name}-postgresql-headless.{self.namespace}.svc.cluster.local",
+                    port=5432,
+                    user=self.username,
+                    password=self.password,
+                    database=self.database,
+                    connect_timeout=5
+                )
+                return conn
+            except Exception as e:
+                logger.warning(f"连接节点 {node_id} 失败: {e}")
+                return None
+        
+        def get_test_data_info(self, node_id):
+            """获取测试数据信息"""
+            conn = self.get_connection(node_id)
+            if not conn:
+                return None
+            
+            try:
+                with conn.cursor() as cursor:
+                    # 检查测试表是否存在
+                    cursor.execute("""
+                        SELECT EXISTS (
+                            SELECT 1 FROM information_schema.tables 
+                            WHERE table_name = 'k8s_test_data'
+                        )
+                    """)
+                    
+                    table_exists = cursor.fetchone()[0]
+                    if not table_exists:
+                        return {
+                            'node_id': node_id,
+                            'accessible': True,
+                            'table_exists': False,
+                            'record_count': 0,
+                            'data_hash': None,
+                            'sequence_range': None
+                        }
+                    
+                    # 获取记录数量
+                    cursor.execute("SELECT COUNT(*) FROM k8s_test_data")
+                    record_count = cursor.fetchone()[0]
+                    
+                    # 获取序列号范围
+                    cursor.execute("SELECT MIN(sequence_num), MAX(sequence_num) FROM k8s_test_data")
+                    seq_range = cursor.fetchone()
+                    
+                    # 计算数据哈希
+                    cursor.execute("""
+                        SELECT md5(string_agg(
+                            sequence_num::text || '|' || 
+                            COALESCE(test_data, '') || '|' || 
+                            COALESCE(writer_id, ''), 
+                            E'\n' ORDER BY sequence_num
+                        )) as data_hash
+                        FROM k8s_test_data
+                    """)
+                    data_hash = cursor.fetchone()[0]
+                    
+                    return {
+                        'node_id': node_id,
+                        'accessible': True,
+                        'table_exists': True,
+                        'record_count': record_count,
+                        'data_hash': data_hash,
+                        'sequence_range': seq_range
+                    }
+                    
+            except Exception as e:
+                logger.error(f"获取节点 {node_id} 数据信息失败: {e}")
+                return {
+                    'node_id': node_id,
+                    'accessible': False,
+                    'error': str(e)
+                }
+            finally:
+                conn.close()
+        
+        def check_consistency(self):
+            """检查数据一致性"""
+            timestamp = datetime.now().isoformat()
+            logger.info("🔍 开始数据一致性检查...")
+            
+            node_data = []
+            accessible_nodes = 0
+            
+            # 收集所有节点的数据信息
+            for i in range(3):  # 假设有3个节点
+                data_info = self.get_test_data_info(i)
+                if data_info:
+                    node_data.append(data_info)
+                    if data_info.get('accessible', False):
+                        accessible_nodes += 1
+            
+            # 分析一致性
+            consistency_report = {
+                'timestamp': timestamp,
+                'accessible_nodes': accessible_nodes,
+                'total_nodes': 3,
+                'nodes': node_data,
+                'consistent': True,
+                'issues': []
+            }
+            
+            if accessible_nodes == 0:
+                consistency_report['consistent'] = False
+                consistency_report['issues'].append('没有可访问的节点')
+                return consistency_report
+            
+            # 检查记录数量一致性
+            accessible_data = [n for n in node_data if n.get('accessible') and n.get('table_exists')]
+            if accessible_data:
+                record_counts = [n['record_count'] for n in accessible_data]
+                data_hashes = [n['data_hash'] for n in accessible_data]
+                
+                # 检查记录数量
+                if len(set(record_counts)) > 1:
+                    consistency_report['consistent'] = False
+                    consistency_report['issues'].append(f'记录数量不一致: {record_counts}')
+                
+                # 检查数据哈希
+                if len(set(data_hashes)) > 1:
+                    consistency_report['consistent'] = False
+                    consistency_report['issues'].append(f'数据内容不一致 (不同的哈希值)')
+                
+                # 检查序列号范围
+                seq_ranges = [n['sequence_range'] for n in accessible_data if n['sequence_range']]
+                if seq_ranges and len(set(seq_ranges)) > 1:
+                    consistency_report['consistent'] = False
+                    consistency_report['issues'].append(f'序列号范围不一致: {seq_ranges}')
+            
+            return consistency_report
+        
+        def print_consistency_report(self, report):
+            """打印一致性报告"""
+            logger.info("=" * 60)
+            logger.info("📊 数据一致性检查报告")
+            logger.info("=" * 60)
+            logger.info(f"检查时间: {report['timestamp']}")
+            logger.info(f"可访问节点: {report['accessible_nodes']}/{report['total_nodes']}")
+            
+            if report['consistent']:
+                logger.info("✅ 数据一致性检查通过")
+            else:
+                logger.info("❌ 发现数据一致性问题:")
+                for issue in report['issues']:
+                    logger.info(f"   - {issue}")
+            
+            logger.info("\n节点详细信息:")
+            for node in report['nodes']:
+                if node.get('accessible'):
+                    if node.get('table_exists'):
+                        logger.info(f"  ✅ 节点 {node['node_id']}: {node['record_count']} 条记录")
+                        if node['sequence_range']:
+                            logger.info(f"      序列范围: {node['sequence_range'][0]} - {node['sequence_range'][1]}")
+                        logger.info(f"      数据哈希: {node['data_hash'][:16]}...")
+                    else:
+                        logger.info(f"  ⚠️ 节点 {node['node_id']}: 测试表不存在")
+                else:
+                    logger.info(f"  ❌ 节点 {node['node_id']}: 不可访问")
+                    if 'error' in node:
+                        logger.info(f"      错误: {node['error']}")
+            
+            logger.info("=" * 60)
+        
+        def run(self):
+            """运行一致性检查"""
+            logger.info("🔍 K8s Patroni 数据一致性检查器启动...")
+            logger.info(f"目标集群: {self.cluster_name} (namespace: {self.namespace})")
+            logger.info(f"检查间隔: {self.interval} 秒")
+            
+            while not self.stop_event.is_set():
+                try:
+                    # 执行一致性检查
+                    report = self.check_consistency()
+                    self.consistency_reports.append(report)
+                    
+                    # 打印报告
+                    self.print_consistency_report(report)
+                    
+                    # 检查是否有严重问题
+                    if not report['consistent']:
+                        logger.warning("⚠️ 检测到数据一致性问题！")
+                    
+                    if report['accessible_nodes'] == 0:
+                        logger.error("🚨 严重警告：没有可访问的节点！")
+                
+                except Exception as e:
+                    logger.error(f"一致性检查失败: {e}")
+                
+                # 等待下一次检查
+                if not self.stop_event.wait(self.interval):
+                    continue
+                else:
+                    break
+            
+            logger.info("🏁 一致性检查完成")
+            logger.info(f"总共执行了 {len(self.consistency_reports)} 次一致性检查")
+            
+            # 打印最终统计
+            consistent_checks = sum(1 for r in self.consistency_reports if r['consistent'])
+            logger.info(f"一致性通过率: {consistent_checks}/{len(self.consistency_reports)} ({consistent_checks/len(self.consistency_reports)*100:.1f}%)")
+    
+    if __name__ == "__main__":
+        checker = PatroniConsistencyChecker()
+        checker.run()
+
+  requirements.txt: |
+    psycopg2-binary==2.9.9
+{{- end }}

@@ -1,0 +1,162 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "patroni-cluster.fullname" . }}-postgresql
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "patroni-cluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgresql
+spec:
+  serviceName: {{ include "patroni-cluster.fullname" . }}-postgresql-headless
+  replicas: {{ .Values.cluster.replicas }}
+  selector:
+    matchLabels:
+      {{- include "patroni-cluster.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: postgresql
+  template:
+    metadata:
+      labels:
+        {{- include "patroni-cluster.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: postgresql
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/patroni-configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "patroni-cluster.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      initContainers:
+      - name: init-chmod-data
+        image: "{{ .Values.postgresql.image.repository }}:{{ .Values.postgresql.image.tag }}"
+        imagePullPolicy: {{ .Values.postgresql.image.pullPolicy }}
+        command:
+        - /bin/bash
+        - -c
+        - |
+          chown -R 999:999 /var/lib/postgresql/data
+          chmod 700 /var/lib/postgresql/data
+        volumeMounts:
+        - name: postgresql-data
+          mountPath: /var/lib/postgresql/data
+        securityContext:
+          runAsUser: 0
+      containers:
+      - name: postgresql
+        image: "{{ .Values.postgresql.patroni.image.repository }}:{{ .Values.postgresql.patroni.image.tag }}"
+        imagePullPolicy: {{ .Values.postgresql.patroni.image.pullPolicy }}
+        ports:
+        - name: postgresql
+          containerPort: 5432
+          protocol: TCP
+        - name: patroni
+          containerPort: 8008
+          protocol: TCP
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: PATRONI_CONFIGURATION
+          value: /etc/patroni/patroni.yml
+        - name: PATRONI_KUBERNETES_POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: PATRONI_KUBERNETES_NAMESPACE
+          value: {{ .Values.global.namespace }}
+        - name: PATRONI_KUBERNETES_LABELS
+          value: '{app.kubernetes.io/name: {{ include "patroni-cluster.name" . }}, app.kubernetes.io/component: postgresql}'
+        - name: PATRONI_SUPERUSER_USERNAME
+          value: {{ .Values.postgresql.username }}
+        - name: PATRONI_SUPERUSER_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "patroni-cluster.fullname" . }}-secret
+              key: superuser-password
+        - name: PATRONI_REPLICATION_USERNAME
+          value: {{ .Values.postgresql.replicationUsername }}
+        - name: PATRONI_REPLICATION_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "patroni-cluster.fullname" . }}-secret
+              key: replication-password
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        - name: POSTGRES_USER
+          value: {{ .Values.postgresql.username }}
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "patroni-cluster.fullname" . }}-secret
+              key: superuser-password
+        - name: POSTGRES_DB
+          value: {{ .Values.postgresql.database }}
+        livenessProbe:
+          httpGet:
+            path: /liveness
+            port: 8008
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /readiness
+            port: 8008
+          initialDelaySeconds: 30
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        resources:
+          {{- toYaml .Values.postgresql.resources | nindent 10 }}
+        volumeMounts:
+        - name: postgresql-data
+          mountPath: /var/lib/postgresql/data
+        - name: patroni-config
+          mountPath: /etc/patroni
+        securityContext:
+          {{- toYaml .Values.securityContext | nindent 10 }}
+      volumes:
+      - name: patroni-config
+        configMap:
+          name: {{ include "patroni-cluster.fullname" . }}-config
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- if .Values.postgresql.persistence.enabled }}
+  volumeClaimTemplates:
+  - metadata:
+      name: postgresql-data
+      {{- with .Values.postgresql.persistence.annotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      accessModes:
+        - {{ .Values.postgresql.persistence.accessMode | quote }}
+      {{- if .Values.global.storageClass }}
+      storageClassName: {{ .Values.global.storageClass | quote }}
+      {{- end }}
+      resources:
+        requests:
+          storage: {{ .Values.postgresql.persistence.size | quote }}
+  {{- else }}
+      volumes:
+      - name: postgresql-data
+        emptyDir: {}
+  {{- end }}

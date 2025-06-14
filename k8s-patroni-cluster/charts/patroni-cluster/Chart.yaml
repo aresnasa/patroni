@@ -1,0 +1,24 @@
+apiVersion: v2
+name: patroni-cluster
+description: A Helm chart for Patroni PostgreSQL High Availability Cluster with etcd and HAProxy
+type: application
+version: 1.0.0
+appVersion: "4.0.6"
+home: https://github.com/patroni/patroni
+keywords:
+  - postgresql
+  - patroni
+  - high-availability
+  - database
+  - etcd
+  - haproxy
+maintainers:
+  - name: Patroni Team
+    url: https://github.com/patroni/patroni
+sources:
+  - https://github.com/patroni/patroni
+  - https://github.com/coreos/etcd
+  - https://github.com/haproxy/haproxy
+dependencies: []
+annotations:
+  category: Database

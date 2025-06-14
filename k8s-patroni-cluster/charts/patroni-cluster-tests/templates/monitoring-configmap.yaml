@@ -1,0 +1,244 @@
+{{- if .Values.monitoring.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "patroni-cluster-tests.fullname" . }}-monitoring
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "patroni-cluster-tests.labels" . | nindent 4 }}
+    app.kubernetes.io/component: monitoring
+data:
+  monitor.py: |
+    #!/usr/bin/env python3
+    import time
+    import requests
+    import logging
+    import sys
+    import signal
+    import psycopg2
+    from datetime import datetime
+    import threading
+    import json
+    
+    # 配置日志
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
+    logger = logging.getLogger(__name__)
+    
+    class PatroniMonitor:
+        def __init__(self):
+            self.namespace = "{{ .Values.targetCluster.namespace }}"
+            self.cluster_name = "{{ .Values.targetCluster.name }}"
+            self.interval = {{ .Values.monitoring.interval }}
+            self.username = "{{ .Values.targetCluster.postgresql.username }}"
+            self.password = "{{ .Values.targetCluster.postgresql.password }}"
+            self.database = "{{ .Values.targetCluster.postgresql.database }}"
+            
+            self.start_time = datetime.now()
+            self.stop_event = threading.Event()
+            self.monitoring_data = []
+            
+            # 注册信号处理器
+            signal.signal(signal.SIGTERM, self._signal_handler)
+            signal.signal(signal.SIGINT, self._signal_handler)
+        
+        def _signal_handler(self, signum, frame):
+            logger.info(f"收到信号 {signum}，正在优雅关闭...")
+            self.stop_event.set()
+        
+        def check_patroni_status(self, node_id):
+            """检查 Patroni 节点状态"""
+            try:
+                url = f"http://{self.cluster_name}-postgresql-{node_id}.{self.cluster_name}-postgresql-headless.{self.namespace}.svc.cluster.local:8008/patroni"
+                response = requests.get(url, timeout=5)
+                if response.status_code == 200:
+                    return response.json()
+                else:
+                    return None
+            except Exception as e:
+                logger.warning(f"检查节点 {node_id} 状态失败: {e}")
+                return None
+        
+        def check_cluster_status(self):
+            """检查整个集群状态"""
+            cluster_status = {
+                'timestamp': datetime.now().isoformat(),
+                'nodes': [],
+                'leader': None,
+                'healthy_nodes': 0,
+                'total_nodes': 3
+            }
+            
+            for i in range(3):  # 假设有3个节点
+                node_status = self.check_patroni_status(i)
+                if node_status:
+                    node_info = {
+                        'id': i,
+                        'name': node_status.get('patroni', {}).get('scope', 'unknown'),
+                        'role': node_status.get('role', 'unknown'),
+                        'state': node_status.get('state', 'unknown'),
+                        'timeline': node_status.get('timeline', 0),
+                        'lag': node_status.get('lag', 'unknown'),
+                        'healthy': True
+                    }
+                    
+                    if node_info['role'] == 'leader':
+                        cluster_status['leader'] = i
+                    
+                    cluster_status['healthy_nodes'] += 1
+                else:
+                    node_info = {
+                        'id': i,
+                        'name': f'postgresql-{i}',
+                        'role': 'unknown',
+                        'state': 'unreachable',
+                        'timeline': 0,
+                        'lag': 'unknown',
+                        'healthy': False
+                    }
+                
+                cluster_status['nodes'].append(node_info)
+            
+            return cluster_status
+        
+        def check_database_connectivity(self):
+            """检查数据库连接性"""
+            connectivity_status = {
+                'primary_accessible': False,
+                'replica_accessible': False,
+                'all_accessible': False
+            }
+            
+            # 检查主库连接
+            try:
+                conn = psycopg2.connect(
+                    host=f"{self.cluster_name}-haproxy.{self.namespace}.svc.cluster.local",
+                    port=5000,  # Primary port
+                    user=self.username,
+                    password=self.password,
+                    database=self.database,
+                    connect_timeout=5
+                )
+                conn.close()
+                connectivity_status['primary_accessible'] = True
+            except Exception as e:
+                logger.warning(f"主库连接失败: {e}")
+            
+            # 检查副本连接
+            try:
+                conn = psycopg2.connect(
+                    host=f"{self.cluster_name}-haproxy.{self.namespace}.svc.cluster.local",
+                    port=5001,  # Replica port
+                    user=self.username,
+                    password=self.password,
+                    database=self.database,
+                    connect_timeout=5
+                )
+                conn.close()
+                connectivity_status['replica_accessible'] = True
+            except Exception as e:
+                logger.warning(f"副本连接失败: {e}")
+            
+            # 检查所有节点连接
+            try:
+                conn = psycopg2.connect(
+                    host=f"{self.cluster_name}-haproxy.{self.namespace}.svc.cluster.local",
+                    port=5002,  # All nodes port
+                    user=self.username,
+                    password=self.password,
+                    database=self.database,
+                    connect_timeout=5
+                )
+                conn.close()
+                connectivity_status['all_accessible'] = True
+            except Exception as e:
+                logger.warning(f"所有节点连接失败: {e}")
+            
+            return connectivity_status
+        
+        def print_status(self, cluster_status, connectivity_status):
+            """打印集群状态"""
+            logger.info("=" * 60)
+            logger.info("📊 Patroni 集群状态监控")
+            logger.info("=" * 60)
+            logger.info(f"检查时间: {cluster_status['timestamp']}")
+            logger.info(f"健康节点: {cluster_status['healthy_nodes']}/{cluster_status['total_nodes']}")
+            
+            if cluster_status['leader'] is not None:
+                logger.info(f"当前主节点: postgresql-{cluster_status['leader']}")
+            else:
+                logger.info("⚠️ 没有检测到主节点")
+            
+            logger.info("\n节点详细状态:")
+            for node in cluster_status['nodes']:
+                status_icon = "✅" if node['healthy'] else "❌"
+                logger.info(f"  {status_icon} {node['name']} (节点 {node['id']})")
+                logger.info(f"      角色: {node['role']}")
+                logger.info(f"      状态: {node['state']}")
+                logger.info(f"      时间线: {node['timeline']}")
+                logger.info(f"      延迟: {node['lag']}")
+            
+            logger.info("\n连接性检查:")
+            primary_icon = "✅" if connectivity_status['primary_accessible'] else "❌"
+            replica_icon = "✅" if connectivity_status['replica_accessible'] else "❌"
+            all_icon = "✅" if connectivity_status['all_accessible'] else "❌"
+            
+            logger.info(f"  {primary_icon} 主库服务 (端口 5000)")
+            logger.info(f"  {replica_icon} 副本服务 (端口 5001)")
+            logger.info(f"  {all_icon} 所有节点服务 (端口 5002)")
+            logger.info("=" * 60)
+        
+        def run(self):
+            """运行监控"""
+            logger.info("🔍 K8s Patroni 集群监控启动...")
+            logger.info(f"目标集群: {self.cluster_name} (namespace: {self.namespace})")
+            logger.info(f"监控间隔: {self.interval} 秒")
+            
+            while not self.stop_event.is_set():
+                try:
+                    # 检查集群状态
+                    cluster_status = self.check_cluster_status()
+                    connectivity_status = self.check_database_connectivity()
+                    
+                    # 记录监控数据
+                    monitoring_entry = {
+                        'cluster_status': cluster_status,
+                        'connectivity_status': connectivity_status
+                    }
+                    self.monitoring_data.append(monitoring_entry)
+                    
+                    # 打印状态
+                    self.print_status(cluster_status, connectivity_status)
+                    
+                    # 检查是否有异常情况
+                    if cluster_status['healthy_nodes'] < cluster_status['total_nodes']:
+                        logger.warning(f"⚠️ 检测到节点故障！健康节点: {cluster_status['healthy_nodes']}/{cluster_status['total_nodes']}")
+                    
+                    if cluster_status['leader'] is None:
+                        logger.error("🚨 严重警告：集群没有主节点！")
+                    
+                    if not connectivity_status['primary_accessible']:
+                        logger.error("🚨 严重警告：主库服务不可访问！")
+                
+                except Exception as e:
+                    logger.error(f"监控检查失败: {e}")
+                
+                # 等待下一次检查
+                if not self.stop_event.wait(self.interval):
+                    continue
+                else:
+                    break
+            
+            logger.info("🏁 监控完成")
+            logger.info(f"总共收集了 {len(self.monitoring_data)} 个监控数据点")
+    
+    if __name__ == "__main__":
+        monitor = PatroniMonitor()
+        monitor.run()
+
+  requirements.txt: |
+    requests==2.31.0
+    psycopg2-binary==2.9.9
+{{- end }}

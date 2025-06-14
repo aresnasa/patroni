@@ -1,0 +1,164 @@
+# Patroni Cluster Tests Configuration
+global:
+  namespace: patroni-cluster
+
+# Target cluster configuration
+targetCluster:
+  name: patroni-cluster
+  namespace: patroni-cluster
+  postgresql:
+    username: postgres
+    password: postgres123
+    database: postgres
+
+# Data Writer Configuration
+dataWriter:
+  enabled: true
+  image:
+    repository: python
+    tag: "3.11-alpine"
+    pullPolicy: IfNotPresent
+  
+  # Test duration in seconds
+  duration: 300
+  
+  # Write interval in seconds
+  interval: 1
+  
+  # Number of concurrent writers
+  replicas: 1
+  
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+
+# Chaos Testing Configuration
+chaosTests:
+  enabled: true
+  image:
+    repository: python
+    tag: "3.11-alpine"
+    pullPolicy: IfNotPresent
+  
+  # Chaos test duration in seconds
+  duration: 600
+  
+  # Interval between chaos actions in seconds
+  interval: 60
+  
+  # Types of chaos to apply
+  chaosTypes:
+    - podKill
+    - networkPartition
+    - cpuStress
+    - memoryStress
+  
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+
+# Monitoring Configuration
+monitoring:
+  enabled: true
+  image:
+    repository: python
+    tag: "3.11-alpine"
+    pullPolicy: IfNotPresent
+  
+  # Monitoring interval in seconds
+  interval: 10
+  
+  resources:
+    limits:
+      cpu: 200m
+      memory: 256Mi
+    requests:
+      cpu: 50m
+      memory: 128Mi
+
+# Load Testing Configuration
+loadTest:
+  enabled: true
+  image:
+    repository: python
+    tag: "3.11-alpine"
+    pullPolicy: IfNotPresent
+  
+  # Number of concurrent connections
+  connections: 10
+  
+  # Test duration in seconds
+  duration: 300
+  
+  # Transactions per second target
+  tps: 100
+  
+  resources:
+    limits:
+      cpu: 1
+      memory: 1Gi
+    requests:
+      cpu: 200m
+      memory: 512Mi
+
+# Consistency Verification Configuration
+consistencyCheck:
+  enabled: true
+  image:
+    repository: python
+    tag: "3.11-alpine"
+    pullPolicy: IfNotPresent
+  
+  # Check interval in seconds
+  interval: 30
+  
+  resources:
+    limits:
+      cpu: 200m
+      memory: 256Mi
+    requests:
+      cpu: 50m
+      memory: 128Mi
+
+# Service Account
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+# Pod annotations
+podAnnotations: {}
+
+# Pod security context
+podSecurityContext:
+  fsGroup: 1000
+
+# Security context
+securityContext:
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: false
+  runAsNonRoot: true
+  runAsUser: 1000
+
+# Node selector
+nodeSelector: {}
+
+# Tolerations
+tolerations: []
+
+# Affinity
+affinity: {}
+
+# RBAC Configuration
+rbac:
+  create: true

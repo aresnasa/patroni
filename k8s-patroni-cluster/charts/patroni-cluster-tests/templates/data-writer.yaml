@@ -1,0 +1,275 @@
+{{- if .Values.dataWriter.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "patroni-cluster-tests.fullname" . }}-data-writer
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "patroni-cluster-tests.labels" . | nindent 4 }}
+    app.kubernetes.io/component: data-writer
+data:
+  data_writer.py: |
+    #!/usr/bin/env python3
+    import psycopg2
+    import time
+    import os
+    import json
+    import logging
+    from datetime import datetime, timedelta
+    import threading
+    import signal
+    import sys
+    
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    logger = logging.getLogger(__name__)
+    
+    class DataWriter:
+        def __init__(self):
+            self.host = "{{ .Values.targetCluster.name }}-haproxy.{{ .Values.targetCluster.namespace }}.svc.cluster.local"
+            self.port = 5000
+            self.username = "{{ .Values.targetCluster.postgresql.username }}"
+            self.password = "{{ .Values.targetCluster.postgresql.password }}"
+            self.database = "{{ .Values.targetCluster.postgresql.database }}"
+            self.duration = {{ .Values.dataWriter.duration }}
+            self.interval = {{ .Values.dataWriter.interval }}
+            
+            self.running = True
+            self.stats = {
+                'transactions': 0,
+                'errors': 0,
+                'start_time': datetime.now(),
+                'last_error': None,
+                'current_leader': None
+            }
+            
+        def signal_handler(self, signum, frame):
+            logger.info("收到停止信号，正在关闭...")
+            self.running = False
+            
+        def connect(self):
+            try:
+                conn = psycopg2.connect(
+                    host=self.host,
+                    port=self.port,
+                    user=self.username,
+                    password=self.password,
+                    database=self.database,
+                    connect_timeout=10
+                )
+                return conn
+            except Exception as e:
+                logger.error(f"连接失败: {e}")
+                return None
+                
+        def setup_database(self):
+            conn = self.connect()
+            if not conn:
+                return False
+                
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS test_data (
+                            id SERIAL PRIMARY KEY,
+                            sequence_id INTEGER NOT NULL,
+                            data TEXT NOT NULL,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            writer_id VARCHAR(50) DEFAULT 'k8s-data-writer'
+                        )
+                    """)
+                    
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS test_events (
+                            id SERIAL PRIMARY KEY,
+                            event_type VARCHAR(50) NOT NULL,
+                            description TEXT,
+                            leader_node VARCHAR(100),
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """)
+                    
+                conn.commit()
+                logger.info("数据库表初始化完成")
+                return True
+            except Exception as e:
+                logger.error(f"初始化数据库失败: {e}")
+                return False
+            finally:
+                conn.close()
+                
+        def get_cluster_leader(self):
+            try:
+                import requests
+                for i in range(3):
+                    url = f"http://{{ .Values.targetCluster.name }}-postgresql-{i}.{{ .Values.targetCluster.name }}-postgresql-headless.{{ .Values.targetCluster.namespace }}.svc.cluster.local:8008/patroni"
+                    try:
+                        response = requests.get(url, timeout=5)
+                        if response.status_code == 200:
+                            data = response.json()
+                            if data.get('role') == 'leader':
+                                return f"postgresql-{i}"
+                    except:
+                        continue
+                return "unknown"
+            except:
+                return "unknown"
+                
+        def write_data(self):
+            sequence_id = 1
+            
+            while self.running and (datetime.now() - self.stats['start_time']).total_seconds() < self.duration:
+                try:
+                    # 检查主节点变化
+                    current_leader = self.get_cluster_leader()
+                    if current_leader != self.stats['current_leader']:
+                        old_leader = self.stats['current_leader'] or 'unknown'
+                        self.stats['current_leader'] = current_leader
+                        logger.info(f"🔄 主节点切换: {old_leader} -> {current_leader}")
+                        self.record_event('failover', f"主节点从 {old_leader} 切换到 {current_leader}", current_leader)
+                    
+                    conn = self.connect()
+                    if not conn:
+                        self.stats['errors'] += 1
+                        time.sleep(1)
+                        continue
+                        
+                    try:
+                        with conn.cursor() as cur:
+                            data = f"Test data {sequence_id} at {datetime.now()}"
+                            cur.execute(
+                                "INSERT INTO test_data (sequence_id, data) VALUES (%s, %s)",
+                                (sequence_id, data)
+                            )
+                        conn.commit()
+                        self.stats['transactions'] += 1
+                        sequence_id += 1
+                        
+                        if self.stats['transactions'] % 50 == 0:
+                            self.print_stats()
+                            
+                    except Exception as e:
+                        self.stats['errors'] += 1
+                        self.stats['last_error'] = str(e)
+                        logger.error(f"写入失败: {e}")
+                        conn.rollback()
+                    finally:
+                        conn.close()
+                        
+                except Exception as e:
+                    self.stats['errors'] += 1
+                    self.stats['last_error'] = str(e)
+                    logger.error(f"事务错误: {e}")
+                    
+                time.sleep(self.interval)
+                
+        def record_event(self, event_type, description, leader_node):
+            try:
+                conn = self.connect()
+                if conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "INSERT INTO test_events (event_type, description, leader_node) VALUES (%s, %s, %s)",
+                            (event_type, description, leader_node)
+                        )
+                    conn.commit()
+                    conn.close()
+                    logger.info(f"记录故障事件: {event_type} - {leader_node} - {description}")
+            except Exception as e:
+                logger.error(f"记录事件失败: {e}")
+                
+        def print_stats(self):
+            runtime = datetime.now() - self.stats['start_time']
+            tps = self.stats['transactions'] / runtime.total_seconds() if runtime.total_seconds() > 0 else 0
+            success_rate = (self.stats['transactions'] / (self.stats['transactions'] + self.stats['errors']) * 100) if (self.stats['transactions'] + self.stats['errors']) > 0 else 100
+            
+            logger.info("📊 统计信息:")
+            logger.info(f"   运行时间: {runtime}")
+            logger.info(f"   写入事务: {self.stats['transactions']}")
+            logger.info(f"   错误次数: {self.stats['errors']}")
+            logger.info(f"   写入速率: {tps:.2f} 事务/秒")
+            logger.info(f"   成功率: {success_rate:.2f}%")
+            if self.stats['current_leader']:
+                logger.info(f"   当前主节点: {self.stats['current_leader']}")
+            if self.stats['last_error']:
+                logger.info(f"   最后错误: {self.stats['last_error']}")
+                
+        def run(self):
+            signal.signal(signal.SIGTERM, self.signal_handler)
+            signal.signal(signal.SIGINT, self.signal_handler)
+            
+            logger.info("🚀 开始数据写入测试...")
+            logger.info(f"目标: {self.host}:{self.port}")
+            logger.info(f"持续时间: {self.duration}秒")
+            logger.info(f"写入间隔: {self.interval}秒")
+            
+            if not self.setup_database():
+                logger.error("数据库初始化失败")
+                return
+                
+            # 获取初始主节点
+            self.stats['current_leader'] = self.get_cluster_leader()
+            logger.info(f"📍 当前主节点: {self.stats['current_leader']}")
+            
+            self.write_data()
+            
+            logger.info("🏁 数据写入测试完成")
+            self.print_stats()
+            
+            # 保存最终统计到文件
+            final_stats = {
+                'transactions': self.stats['transactions'],
+                'errors': self.stats['errors'],
+                'duration': (datetime.now() - self.stats['start_time']).total_seconds(),
+                'tps': self.stats['transactions'] / (datetime.now() - self.stats['start_time']).total_seconds() if (datetime.now() - self.stats['start_time']).total_seconds() > 0 else 0,
+                'success_rate': (self.stats['transactions'] / (self.stats['transactions'] + self.stats['errors']) * 100) if (self.stats['transactions'] + self.stats['errors']) > 0 else 100,
+                'final_leader': self.stats['current_leader']
+            }
+            
+            with open('/tmp/data_writer_results.json', 'w') as f:
+                json.dump(final_stats, f, indent=2)
+                
+    if __name__ == "__main__":
+        writer = DataWriter()
+        writer.run()
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "patroni-cluster-tests.fullname" . }}-data-writer
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "patroni-cluster-tests.labels" . | nindent 4 }}
+    app.kubernetes.io/component: data-writer
+spec:
+  template:
+    metadata:
+      labels:
+        {{- include "patroni-cluster-tests.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: data-writer
+    spec:
+      serviceAccountName: {{ include "patroni-cluster-tests.serviceAccountName" . }}
+      restartPolicy: Never
+      containers:
+      - name: data-writer
+        image: "{{ .Values.dataWriter.image.repository }}:{{ .Values.dataWriter.image.tag }}"
+        imagePullPolicy: {{ .Values.dataWriter.image.pullPolicy }}
+        command:
+        - /bin/sh
+        - -c
+        - |
+          apk add --no-cache postgresql-client python3-dev gcc musl-dev
+          pip install psycopg2-binary requests
+          python3 /scripts/data_writer.py
+        volumeMounts:
+        - name: script
+          mountPath: /scripts
+        resources:
+          {{- toYaml .Values.dataWriter.resources | nindent 10 }}
+        securityContext:
+          {{- toYaml .Values.securityContext | nindent 10 }}
+      volumes:
+      - name: script
+        configMap:
+          name: {{ include "patroni-cluster-tests.fullname" . }}-data-writer
+          defaultMode: 0755
+{{- end }}

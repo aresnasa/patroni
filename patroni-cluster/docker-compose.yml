@@ -1,0 +1,239 @@
+# Patroni PostgreSQL 高可用集群配置
+# 包含 3节点etcd集群、3节点PostgreSQL集群、HAProxy负载均衡器、Chaos Engineering工具
+#
+# 启动集群:
+# $ docker-compose up -d
+#
+# 访问方式:
+# - PostgreSQL 主库 (通过 HAProxy): localhost:15000
+# - PostgreSQL 副本 (通过 HAProxy): localhost:15001
+# - PostgreSQL 所有节点 (通过 HAProxy): localhost:15002
+# - PostgreSQL 直连: localhost:15432, 15433, 15434
+# - HAProxy 统计页面: http://localhost:17000
+# - Patroni REST API: http://localhost:8008, 8009, 8010
+
+
+networks:
+  patroni-net:
+    driver: bridge
+
+volumes:
+  etcd1-data:
+  etcd2-data:
+  etcd3-data:
+  postgres1-data:
+  postgres2-data:
+  postgres3-data:
+
+services:
+  # etcd 集群节点 1
+  etcd1:
+    image: bitnami/etcd:latest
+    networks:
+      - patroni-net
+    volumes:
+      - etcd1-data:/bitnami/etcd
+    environment:
+      ETCD_NAME: etcd1
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://etcd1:2380
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd1:2379
+      ETCD_LISTEN_PEER_URLS: http://0.0.0.0:2380
+      ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+      ETCD_INITIAL_CLUSTER: etcd1=http://etcd1:2380,etcd2=http://etcd2:2380,etcd3=http://etcd3:2380
+      ETCD_INITIAL_CLUSTER_STATE: new
+      ETCD_INITIAL_CLUSTER_TOKEN: patroni-cluster
+      ALLOW_NONE_AUTHENTICATION: yes
+    container_name: patroni-etcd1
+    hostname: etcd1
+    restart: unless-stopped
+
+  # etcd 集群节点 2
+  etcd2:
+    image: bitnami/etcd:latest
+    networks:
+      - patroni-net
+    volumes:
+      - etcd2-data:/bitnami/etcd
+    environment:
+      ETCD_NAME: etcd2
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://etcd2:2380
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd2:2379
+      ETCD_LISTEN_PEER_URLS: http://0.0.0.0:2380
+      ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+      ETCD_INITIAL_CLUSTER: etcd1=http://etcd1:2380,etcd2=http://etcd2:2380,etcd3=http://etcd3:2380
+      ETCD_INITIAL_CLUSTER_STATE: new
+      ETCD_INITIAL_CLUSTER_TOKEN: patroni-cluster
+      ALLOW_NONE_AUTHENTICATION: yes
+    container_name: patroni-etcd2
+    hostname: etcd2
+    restart: unless-stopped
+
+  # etcd 集群节点 3
+  etcd3:
+    image: bitnami/etcd:latest
+    networks:
+      - patroni-net
+    volumes:
+      - etcd3-data:/bitnami/etcd
+    environment:
+      ETCD_NAME: etcd3
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://etcd3:2380
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd3:2379
+      ETCD_LISTEN_PEER_URLS: http://0.0.0.0:2380
+      ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+      ETCD_INITIAL_CLUSTER: etcd1=http://etcd1:2380,etcd2=http://etcd2:2380,etcd3=http://etcd3:2380
+      ETCD_INITIAL_CLUSTER_STATE: new
+      ETCD_INITIAL_CLUSTER_TOKEN: patroni-cluster
+      ALLOW_NONE_AUTHENTICATION: yes
+    container_name: patroni-etcd3
+    hostname: etcd3
+    restart: unless-stopped
+
+  # PostgreSQL 节点 1 (使用 Patroni)
+  postgres1:
+    image: postgres:15-alpine
+    networks: 
+      - patroni-net
+    volumes:
+      - postgres1-data:/var/lib/postgresql/data
+      - ./patroni.yml:/etc/patroni/patroni.yml:ro
+      - ./entrypoint.sh:/entrypoint.sh:ro
+    environment:
+      PATRONI_SCOPE: postgres-cluster
+      PATRONI_NAME: postgres1
+      PATRONI_ETCD3_HOSTS: etcd1:2379,etcd2:2379,etcd3:2379
+      PATRONI_RESTAPI_LISTEN: 0.0.0.0:8008
+      PATRONI_RESTAPI_CONNECT_ADDRESS: postgres1:8008
+      PATRONI_POSTGRESQL_LISTEN: 0.0.0.0:5432
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: postgres1:5432
+      PATRONI_POSTGRESQL_DATA_DIR: /var/lib/postgresql/data
+      PATRONI_POSTGRESQL_PGPASS: /tmp/pgpass
+      PATRONI_SUPERUSER_USERNAME: postgres
+      PATRONI_SUPERUSER_PASSWORD: postgres123
+      PATRONI_REPLICATION_USERNAME: replicator
+      PATRONI_REPLICATION_PASSWORD: replicator123
+      PATRONI_admin_PASSWORD: admin123
+      PATRONI_admin_OPTIONS: createdb,createrole
+    container_name: patroni-postgres1
+    hostname: postgres1
+    ports:
+      - "15432:5432"
+      - "8008:8008"
+    depends_on:
+      - etcd1
+      - etcd2
+      - etcd3
+    entrypoint: /entrypoint.sh
+    restart: unless-stopped
+
+  # PostgreSQL 节点 2 (使用 Patroni)
+  postgres2:
+    image: postgres:15-alpine
+    networks: 
+      - patroni-net
+    volumes:
+      - postgres2-data:/var/lib/postgresql/data
+      - ./patroni.yml:/etc/patroni/patroni.yml:ro
+      - ./entrypoint.sh:/entrypoint.sh:ro
+    environment:
+      PATRONI_SCOPE: postgres-cluster
+      PATRONI_NAME: postgres2
+      PATRONI_ETCD3_HOSTS: etcd1:2379,etcd2:2379,etcd3:2379
+      PATRONI_RESTAPI_LISTEN: 0.0.0.0:8009
+      PATRONI_RESTAPI_CONNECT_ADDRESS: postgres2:8009
+      PATRONI_POSTGRESQL_LISTEN: 0.0.0.0:5432
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: postgres2:5432
+      PATRONI_POSTGRESQL_DATA_DIR: /var/lib/postgresql/data
+      PATRONI_POSTGRESQL_PGPASS: /tmp/pgpass
+      PATRONI_SUPERUSER_USERNAME: postgres
+      PATRONI_SUPERUSER_PASSWORD: postgres123
+      PATRONI_REPLICATION_USERNAME: replicator
+      PATRONI_REPLICATION_PASSWORD: replicator123
+      PATRONI_admin_PASSWORD: admin123
+      PATRONI_admin_OPTIONS: createdb,createrole
+    container_name: patroni-postgres2
+    hostname: postgres2
+    ports:
+      - "15433:5432"
+      - "8009:8009"
+    depends_on:
+      - etcd1
+      - etcd2
+      - etcd3
+    entrypoint: /entrypoint.sh
+    restart: unless-stopped
+
+  # PostgreSQL 节点 3 (使用 Patroni)
+  postgres3:
+    image: postgres:15-alpine
+    networks: 
+      - patroni-net
+    volumes:
+      - postgres3-data:/var/lib/postgresql/data
+      - ./patroni.yml:/etc/patroni/patroni.yml:ro
+      - ./entrypoint.sh:/entrypoint.sh:ro
+    environment:
+      PATRONI_SCOPE: postgres-cluster
+      PATRONI_NAME: postgres3
+      PATRONI_ETCD3_HOSTS: etcd1:2379,etcd2:2379,etcd3:2379
+      PATRONI_RESTAPI_LISTEN: 0.0.0.0:8010
+      PATRONI_RESTAPI_CONNECT_ADDRESS: postgres3:8010
+      PATRONI_POSTGRESQL_LISTEN: 0.0.0.0:5432
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: postgres3:5432
+      PATRONI_POSTGRESQL_DATA_DIR: /var/lib/postgresql/data
+      PATRONI_POSTGRESQL_PGPASS: /tmp/pgpass
+      PATRONI_SUPERUSER_USERNAME: postgres
+      PATRONI_SUPERUSER_PASSWORD: postgres123
+      PATRONI_REPLICATION_USERNAME: replicator
+      PATRONI_REPLICATION_PASSWORD: replicator123
+      PATRONI_admin_PASSWORD: admin123
+      PATRONI_admin_OPTIONS: createdb,createrole
+    container_name: patroni-postgres3
+    hostname: postgres3
+    ports:
+      - "15434:5432"
+      - "8010:8010"
+    depends_on:
+      - etcd1
+      - etcd2
+      - etcd3
+    entrypoint: /entrypoint.sh
+    restart: unless-stopped
+
+  # HAProxy 负载均衡器
+  haproxy:
+    image: haproxy:2.8-alpine
+    networks: 
+      - patroni-net
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    ports:
+      - "15000:5000"  # PostgreSQL 主库连接
+      - "15001:5001"  # PostgreSQL 副本连接
+      - "15002:5002"  # PostgreSQL 所有节点
+      - "17000:7000"  # HAProxy 统计页面
+    container_name: patroni-haproxy
+    hostname: haproxy
+    depends_on:
+      - postgres1
+      - postgres2
+      - postgres3
+    restart: unless-stopped
+
+  # Chaos Engineering 工具
+  chaos-monkey:
+    image: alpine:latest
+    networks:
+      - patroni-net
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./chaos-scripts:/chaos-scripts:ro
+    command: >
+      sh -c "
+        apk add --no-cache docker-cli curl jq &&
+        echo 'Chaos Monkey ready for fault injection...' &&
+        tail -f /dev/null
+      "
+    container_name: patroni-chaos-monkey
+    hostname: chaos-monkey
+    restart: unless-stopped

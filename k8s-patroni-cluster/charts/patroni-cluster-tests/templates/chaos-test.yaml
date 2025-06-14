@@ -1,0 +1,331 @@
+{{- if .Values.chaosTests.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "patroni-cluster-tests.fullname" . }}-chaos-test
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "patroni-cluster-tests.labels" . | nindent 4 }}
+    app.kubernetes.io/component: chaos-test
+data:
+  chaos_test.py: |
+    #!/usr/bin/env python3
+    import subprocess
+    import time
+    import random
+    import logging
+    import json
+    import os
+    from datetime import datetime, timedelta
+    import signal
+    import sys
+    
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    logger = logging.getLogger(__name__)
+    
+    class ChaosEngineer:
+        def __init__(self):
+            self.namespace = "{{ .Values.targetCluster.namespace }}"
+            self.cluster_name = "{{ .Values.targetCluster.name }}"
+            self.duration = {{ .Values.chaosTests.duration }}
+            self.interval = {{ .Values.chaosTests.interval }}
+            self.chaos_types = {{ .Values.chaosTests.chaosTypes | toJson }}
+            
+            self.running = True
+            self.chaos_count = 0
+            self.start_time = datetime.now()
+            
+        def signal_handler(self, signum, frame):
+            logger.info("收到停止信号，正在关闭混沌测试...")
+            self.running = False
+            
+        def run_kubectl(self, cmd):
+            try:
+                result = subprocess.run(
+                    f"kubectl {cmd}",
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                return result.returncode == 0, result.stdout, result.stderr
+            except subprocess.TimeoutExpired:
+                logger.error("kubectl命令超时")
+                return False, "", "timeout"
+            except Exception as e:
+                logger.error(f"执行kubectl命令失败: {e}")
+                return False, "", str(e)
+                
+        def get_postgres_pods(self):
+            success, stdout, stderr = self.run_kubectl(
+                f"-n {self.namespace} get pods -l app.kubernetes.io/component=postgresql -o jsonpath='{{.items[*].metadata.name}}'"
+            )
+            if success and stdout:
+                return stdout.strip().split()
+            return []
+            
+        def get_etcd_pods(self):
+            success, stdout, stderr = self.run_kubectl(
+                f"-n {self.namespace} get pods -l app.kubernetes.io/component=etcd -o jsonpath='{{.items[*].metadata.name}}'"
+            )
+            if success and stdout:
+                return stdout.strip().split()
+            return []
+            
+        def kill_random_postgres_pod(self):
+            pods = self.get_postgres_pods()
+            if not pods:
+                logger.error("没有找到PostgreSQL Pod")
+                return False
+                
+            pod = random.choice(pods)
+            logger.warning(f"🔥 执行混沌测试: 删除PostgreSQL Pod {pod}")
+            
+            success, stdout, stderr = self.run_kubectl(f"-n {self.namespace} delete pod {pod}")
+            if success:
+                logger.info(f"✅ Pod {pod} 已删除")
+                # 等待Pod重启
+                time.sleep(30)
+                logger.info(f"⏰ 等待Pod {pod} 重启完成")
+                return True
+            else:
+                logger.error(f"❌ 删除Pod失败: {stderr}")
+                return False
+                
+        def kill_random_etcd_pod(self):
+            pods = self.get_etcd_pods()
+            if not pods:
+                logger.error("没有找到etcd Pod")
+                return False
+                
+            pod = random.choice(pods)
+            logger.warning(f"🔥 执行混沌测试: 删除etcd Pod {pod}")
+            
+            success, stdout, stderr = self.run_kubectl(f"-n {self.namespace} delete pod {pod}")
+            if success:
+                logger.info(f"✅ Pod {pod} 已删除")
+                time.sleep(20)
+                logger.info(f"⏰ 等待Pod {pod} 重启完成")
+                return True
+            else:
+                logger.error(f"❌ 删除Pod失败: {stderr}")
+                return False
+                
+        def simulate_network_partition(self):
+            pods = self.get_postgres_pods()
+            if len(pods) < 2:
+                logger.error("Pod数量不足，无法模拟网络分区")
+                return False
+                
+            pod = random.choice(pods)
+            logger.warning(f"🌐 执行混沌测试: 网络分区隔离 {pod}")
+            
+            # 使用NetworkPolicy隔离Pod
+            network_policy = f"""
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: chaos-isolation-{pod}
+  namespace: {self.namespace}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {pod}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress: []
+  egress: []
+"""
+            
+            # 应用网络策略
+            try:
+                with open('/tmp/network-policy.yaml', 'w') as f:
+                    f.write(network_policy)
+                    
+                success, stdout, stderr = self.run_kubectl("apply -f /tmp/network-policy.yaml")
+                if success:
+                    logger.info(f"✅ 网络分区已应用到 {pod}")
+                    time.sleep(60)  # 保持分区1分钟
+                    
+                    # 删除网络策略恢复连接
+                    self.run_kubectl(f"-n {self.namespace} delete networkpolicy chaos-isolation-{pod}")
+                    logger.info(f"🔄 网络分区已恢复 {pod}")
+                    return True
+                else:
+                    logger.error(f"❌ 应用网络策略失败: {stderr}")
+                    return False
+            except Exception as e:
+                logger.error(f"❌ 网络分区测试失败: {e}")
+                return False
+                
+        def simulate_cpu_stress(self):
+            pods = self.get_postgres_pods()
+            if not pods:
+                logger.error("没有找到PostgreSQL Pod")
+                return False
+                
+            pod = random.choice(pods)
+            logger.warning(f"💻 执行混沌测试: CPU压力测试 {pod}")
+            
+            # 在Pod中执行CPU压力测试
+            stress_cmd = f"-n {self.namespace} exec {pod} -c postgresql -- sh -c 'for i in 1 2 3 4; do dd if=/dev/zero of=/dev/null & done; sleep 60; killall dd'"
+            
+            success, stdout, stderr = self.run_kubectl(stress_cmd)
+            if success:
+                logger.info(f"✅ CPU压力测试完成 {pod}")
+                return True
+            else:
+                logger.error(f"❌ CPU压力测试失败: {stderr}")
+                return False
+                
+        def simulate_memory_stress(self):
+            pods = self.get_postgres_pods()
+            if not pods:
+                logger.error("没有找到PostgreSQL Pod")
+                return False
+                
+            pod = random.choice(pods)
+            logger.warning(f"🧠 执行混沌测试: 内存压力测试 {pod}")
+            
+            # 在Pod中执行内存压力测试
+            stress_cmd = f"-n {self.namespace} exec {pod} -c postgresql -- sh -c 'yes | tr \\n x | head -c 500m | grep n || true'"
+            
+            success, stdout, stderr = self.run_kubectl(stress_cmd)
+            if success:
+                logger.info(f"✅ 内存压力测试完成 {pod}")
+                return True
+            else:
+                logger.error(f"❌ 内存压力测试失败: {stderr}")
+                return False
+                
+        def execute_random_chaos(self):
+            chaos_actions = {
+                'podKill': lambda: self.kill_random_postgres_pod(),
+                'etcdKill': lambda: self.kill_random_etcd_pod(),
+                'networkPartition': lambda: self.simulate_network_partition(),
+                'cpuStress': lambda: self.simulate_cpu_stress(),
+                'memoryStress': lambda: self.simulate_memory_stress()
+            }
+            
+            available_actions = [action for action in self.chaos_types if action in chaos_actions]
+            if not available_actions:
+                logger.error("没有可用的混沌测试类型")
+                return False
+                
+            action = random.choice(available_actions)
+            logger.info(f"🎲 随机选择混沌测试: {action}")
+            
+            return chaos_actions[action]()
+            
+        def check_cluster_health(self):
+            # 检查PostgreSQL集群健康状态
+            pods = self.get_postgres_pods()
+            healthy_pods = 0
+            
+            for pod in pods:
+                success, stdout, stderr = self.run_kubectl(
+                    f"-n {self.namespace} exec {pod} -c postgresql -- pg_isready -U postgres"
+                )
+                if success:
+                    healthy_pods += 1
+                    
+            health_percentage = (healthy_pods / len(pods) * 100) if pods else 0
+            logger.info(f"🏥 集群健康状态: {healthy_pods}/{len(pods)} ({health_percentage:.1f}%)")
+            
+            return health_percentage >= 66.7  # 至少2/3的节点健康
+            
+        def run(self):
+            signal.signal(signal.SIGTERM, self.signal_handler)
+            signal.signal(signal.SIGINT, self.signal_handler)
+            
+            logger.info("🌪️ 开始混沌工程测试...")
+            logger.info(f"目标集群: {self.cluster_name} (namespace: {self.namespace})")
+            logger.info(f"测试持续时间: {self.duration}秒")
+            logger.info(f"混沌间隔: {self.interval}秒")
+            logger.info(f"混沌类型: {', '.join(self.chaos_types)}")
+            
+            while self.running and (datetime.now() - self.start_time).total_seconds() < self.duration:
+                # 检查集群健康状态
+                if not self.check_cluster_health():
+                    logger.warning("⚠️ 集群健康状态不佳，跳过本次混沌测试")
+                    time.sleep(30)
+                    continue
+                    
+                # 执行混沌测试
+                if self.execute_random_chaos():
+                    self.chaos_count += 1
+                    logger.info(f"✅ 混沌测试 #{self.chaos_count} 执行完成")
+                else:
+                    logger.error(f"❌ 混沌测试执行失败")
+                    
+                # 等待恢复时间
+                logger.info(f"⏰ 等待 {self.interval} 秒后执行下一次混沌测试...")
+                time.sleep(self.interval)
+                
+            logger.info("🏁 混沌工程测试完成")
+            logger.info(f"总计执行混沌测试: {self.chaos_count} 次")
+            
+            # 最终健康检查
+            final_health = self.check_cluster_health()
+            logger.info(f"🎯 最终集群健康状态: {'✅ 健康' if final_health else '❌ 不健康'}")
+            
+            # 保存测试结果
+            results = {
+                'chaos_count': self.chaos_count,
+                'duration': (datetime.now() - self.start_time).total_seconds(),
+                'final_health': final_health,
+                'chaos_types_used': self.chaos_types
+            }
+            
+            with open('/tmp/chaos_test_results.json', 'w') as f:
+                json.dump(results, f, indent=2)
+                
+    if __name__ == "__main__":
+        chaos = ChaosEngineer()
+        chaos.run()
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "patroni-cluster-tests.fullname" . }}-chaos-test
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "patroni-cluster-tests.labels" . | nindent 4 }}
+    app.kubernetes.io/component: chaos-test
+spec:
+  template:
+    metadata:
+      labels:
+        {{- include "patroni-cluster-tests.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: chaos-test
+    spec:
+      serviceAccountName: {{ include "patroni-cluster-tests.serviceAccountName" . }}
+      restartPolicy: Never
+      containers:
+      - name: chaos-test
+        image: "{{ .Values.chaosTests.image.repository }}:{{ .Values.chaosTests.image.tag }}"
+        imagePullPolicy: {{ .Values.chaosTests.image.pullPolicy }}
+        command:
+        - /bin/sh
+        - -c
+        - |
+          apk add --no-cache curl
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          mv kubectl /usr/local/bin/
+          pip install requests
+          python3 /scripts/chaos_test.py
+        volumeMounts:
+        - name: script
+          mountPath: /scripts
+        resources:
+          {{- toYaml .Values.chaosTests.resources | nindent 10 }}
+        securityContext:
+          {{- toYaml .Values.securityContext | nindent 10 }}
+      volumes:
+      - name: script
+        configMap:
+          name: {{ include "patroni-cluster-tests.fullname" . }}-chaos-test
+          defaultMode: 0755
+{{- end }}

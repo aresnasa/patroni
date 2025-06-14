@@ -1,0 +1,123 @@
+{{- if .Values.tests.enabled }}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "{{ include "patroni-cluster.fullname" . }}-test"
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "patroni-cluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: test
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-weight": "1"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  containers:
+  - name: test
+    image: "{{ .Values.tests.image.repository }}:{{ .Values.tests.image.tag }}"
+    imagePullPolicy: {{ .Values.tests.image.pullPolicy }}
+    command:
+    - /bin/bash
+    - -c
+    - |
+      set -e
+      echo "🧪 Starting Patroni Cluster Tests..."
+      
+      # Test 1: Check etcd cluster health
+      echo "Test 1: Checking etcd cluster health..."
+      apk add --no-cache curl
+      
+      for i in 0 1 2; do
+        if curl -f "http://{{ include "patroni-cluster.fullname" . }}-etcd-${i}.{{ include "patroni-cluster.fullname" . }}-etcd-headless.{{ .Values.global.namespace }}.svc.cluster.local:2379/health"; then
+          echo "✅ etcd-${i} is healthy"
+        else
+          echo "❌ etcd-${i} is not healthy"
+          exit 1
+        fi
+      done
+      
+      # Test 2: Check PostgreSQL cluster status
+      echo "Test 2: Checking PostgreSQL cluster status..."
+      sleep 30  # Wait for cluster to be ready
+      
+      for i in 0 1 2; do
+        if curl -f "http://{{ include "patroni-cluster.fullname" . }}-postgresql-${i}.{{ include "patroni-cluster.fullname" . }}-postgresql-headless.{{ .Values.global.namespace }}.svc.cluster.local:8008/"; then
+          echo "✅ PostgreSQL node ${i} is responding"
+        else
+          echo "❌ PostgreSQL node ${i} is not responding"
+          exit 1
+        fi
+      done
+      
+      # Test 3: Check cluster has a leader
+      echo "Test 3: Checking for cluster leader..."
+      leader_found=false
+      for i in 0 1 2; do
+        role=$(curl -s "http://{{ include "patroni-cluster.fullname" . }}-postgresql-${i}.{{ include "patroni-cluster.fullname" . }}-postgresql-headless.{{ .Values.global.namespace }}.svc.cluster.local:8008/patroni" | grep -o '"role":"[^"]*"' | cut -d'"' -f4 || echo "unknown")
+        echo "Node ${i} role: ${role}"
+        if [ "$role" = "leader" ]; then
+          leader_found=true
+          echo "✅ Found leader on node ${i}"
+        fi
+      done
+      
+      if [ "$leader_found" = false ]; then
+        echo "❌ No leader found in cluster"
+        exit 1
+      fi
+      
+      # Test 4: Test database connectivity
+      echo "Test 4: Testing database connectivity..."
+      apk add --no-cache postgresql-client
+      
+      export PGPASSWORD='{{ .Values.postgresql.password }}'
+      
+      # Test connection to HAProxy primary service
+      if psql -h "{{ include "patroni-cluster.fullname" . }}-haproxy.{{ .Values.global.namespace }}.svc.cluster.local" -p {{ .Values.haproxy.service.ports.primary }} -U {{ .Values.postgresql.username }} -d {{ .Values.postgresql.database }} -c "SELECT version();" > /dev/null 2>&1; then
+        echo "✅ Connection to primary service successful"
+      else
+        echo "❌ Connection to primary service failed"
+        exit 1
+      fi
+      
+      # Test connection to HAProxy replica service
+      if psql -h "{{ include "patroni-cluster.fullname" . }}-haproxy.{{ .Values.global.namespace }}.svc.cluster.local" -p {{ .Values.haproxy.service.ports.replica }} -U {{ .Values.postgresql.username }} -d {{ .Values.postgresql.database }} -c "SELECT version();" > /dev/null 2>&1; then
+        echo "✅ Connection to replica service successful"
+      else
+        echo "❌ Connection to replica service failed"
+        exit 1
+      fi
+      
+      # Test 5: Test basic database operations
+      echo "Test 5: Testing basic database operations..."
+      
+      # Create test table
+      psql -h "{{ include "patroni-cluster.fullname" . }}-haproxy.{{ .Values.global.namespace }}.svc.cluster.local" -p {{ .Values.haproxy.service.ports.primary }} -U {{ .Values.postgresql.username }} -d {{ .Values.postgresql.database }} -c "
+        CREATE TABLE IF NOT EXISTS test_table (
+          id SERIAL PRIMARY KEY,
+          name VARCHAR(100),
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+      "
+      
+      # Insert test data
+      psql -h "{{ include "patroni-cluster.fullname" . }}-haproxy.{{ .Values.global.namespace }}.svc.cluster.local" -p {{ .Values.haproxy.service.ports.primary }} -U {{ .Values.postgresql.username }} -d {{ .Values.postgresql.database }} -c "
+        INSERT INTO test_table (name) VALUES ('test-record-1'), ('test-record-2');
+      "
+      
+      # Read data from replica
+      result=$(psql -h "{{ include "patroni-cluster.fullname" . }}-haproxy.{{ .Values.global.namespace }}.svc.cluster.local" -p {{ .Values.haproxy.service.ports.replica }} -U {{ .Values.postgresql.username }} -d {{ .Values.postgresql.database }} -t -c "SELECT COUNT(*) FROM test_table;")
+      
+      if [ "$(echo $result | tr -d ' ')" = "2" ]; then
+        echo "✅ Data replication working correctly"
+      else
+        echo "❌ Data replication failed"
+        exit 1
+      fi
+      
+      # Clean up test data
+      psql -h "{{ include "patroni-cluster.fullname" . }}-haproxy.{{ .Values.global.namespace }}.svc.cluster.local" -p {{ .Values.haproxy.service.ports.primary }} -U {{ .Values.postgresql.username }} -d {{ .Values.postgresql.database }} -c "DROP TABLE test_table;"
+      
+      echo "🎉 All tests passed successfully!"
+{{- end }}

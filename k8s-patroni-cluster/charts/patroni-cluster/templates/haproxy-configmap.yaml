@@ -1,0 +1,70 @@
+{{- if .Values.haproxy.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "patroni-cluster.fullname" . }}-haproxy-config
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "patroni-cluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: haproxy
+data:
+  haproxy.cfg: |
+    global
+        daemon
+        user haproxy
+        group haproxy
+        maxconn {{ .Values.haproxy.config.maxconn }}
+        log stdout local0
+    
+    defaults
+        mode tcp
+        timeout connect {{ .Values.haproxy.config.timeout.connect }}
+        timeout client {{ .Values.haproxy.config.timeout.client }}
+        timeout server {{ .Values.haproxy.config.timeout.server }}
+        option tcplog
+        log global
+        retries 3
+    
+    {{- if .Values.haproxy.config.stats.enabled }}
+    listen stats
+        bind *:{{ .Values.haproxy.service.ports.stats }}
+        mode http
+        stats enable
+        stats uri {{ .Values.haproxy.config.stats.uri }}
+        stats refresh 30s
+        stats realm HAProxy\ Statistics
+        stats auth {{ .Values.haproxy.config.stats.username }}:{{ .Values.haproxy.config.stats.password }}
+    {{- end }}
+    
+    # Primary (read-write) backend
+    listen primary
+        bind *:{{ .Values.haproxy.service.ports.primary }}
+        option httpchk GET /primary
+        http-check expect status 200
+        default-server inter 3s fall 3 rise 2 on-marked-down shutdown-sessions
+        {{- range $i := until (int .Values.cluster.replicas) }}
+        server {{ include "patroni-cluster.fullname" $ }}-postgresql-{{ $i }} {{ include "patroni-cluster.fullname" $ }}-postgresql-{{ $i }}.{{ include "patroni-cluster.fullname" $ }}-postgresql-headless.{{ $.Values.global.namespace }}.svc.cluster.local:5432 maxconn 100 check port 8008
+        {{- end }}
+    
+    # Replica (read-only) backend
+    listen replica
+        bind *:{{ .Values.haproxy.service.ports.replica }}
+        balance roundrobin
+        option httpchk GET /replica
+        http-check expect status 200
+        default-server inter 3s fall 3 rise 2 on-marked-down shutdown-sessions
+        {{- range $i := until (int .Values.cluster.replicas) }}
+        server {{ include "patroni-cluster.fullname" $ }}-postgresql-{{ $i }} {{ include "patroni-cluster.fullname" $ }}-postgresql-{{ $i }}.{{ include "patroni-cluster.fullname" $ }}-postgresql-headless.{{ $.Values.global.namespace }}.svc.cluster.local:5432 maxconn 100 check port 8008
+        {{- end }}
+    
+    # All nodes (read-write on primary, read-only on replicas)
+    listen all
+        bind *:{{ .Values.haproxy.service.ports.all }}
+        balance roundrobin
+        option httpchk GET /
+        http-check expect status 200
+        default-server inter 3s fall 3 rise 2 on-marked-down shutdown-sessions
+        {{- range $i := until (int .Values.cluster.replicas) }}
+        server {{ include "patroni-cluster.fullname" $ }}-postgresql-{{ $i }} {{ include "patroni-cluster.fullname" $ }}-postgresql-{{ $i }}.{{ include "patroni-cluster.fullname" $ }}-postgresql-headless.{{ $.Values.global.namespace }}.svc.cluster.local:5432 maxconn 100 check port 8008
+        {{- end }}
+{{- end }}

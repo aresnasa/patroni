@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "patroni-cluster.fullname" . }}-postgresql
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "patroni-cluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgresql
+  {{- with .Values.postgresql.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.postgresql.service.type }}
+  ports:
+  - port: {{ .Values.postgresql.service.port }}
+    targetPort: postgresql
+    protocol: TCP
+    name: postgresql
+  - port: 8008
+    targetPort: patroni
+    protocol: TCP
+    name: patroni
+  selector:
+    {{- include "patroni-cluster.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: postgresql
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "patroni-cluster.fullname" . }}-postgresql-headless
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "patroni-cluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgresql
+spec:
+  clusterIP: None
+  ports:
+  - port: {{ .Values.postgresql.service.port }}
+    targetPort: postgresql
+    protocol: TCP
+    name: postgresql
+  - port: 8008
+    targetPort: patroni
+    protocol: TCP
+    name: patroni
+  selector:
+    {{- include "patroni-cluster.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: postgresql

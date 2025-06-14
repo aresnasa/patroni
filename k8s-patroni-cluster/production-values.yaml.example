@@ -1,0 +1,121 @@
+# 生产环境配置示例
+# 复制此文件到 production-values.yaml 并根据需要修改
+
+global:
+  storageClass: "fast-ssd"
+  namespace: "production-db"
+
+# PostgreSQL 配置
+postgresql:
+  # 生产环境建议使用强密码
+  password: "SecurePassword123!"
+  replicationPassword: "ReplicationPassword456!"
+  
+  # 生产环境资源配置
+  resources:
+    limits:
+      cpu: 4
+      memory: 8Gi
+    requests:
+      cpu: 2
+      memory: 4Gi
+  
+  # 生产环境存储配置
+  persistence:
+    enabled: true
+    size: 100Gi
+    accessMode: ReadWriteOnce
+  
+  # 生产环境 PostgreSQL 参数优化
+  patroni:
+    parameters:
+      max_connections: 500
+      shared_buffers: 2GB
+      effective_cache_size: 6GB
+      maintenance_work_mem: 256MB
+      checkpoint_completion_target: 0.9
+      wal_buffers: 32MB
+      default_statistics_target: 100
+      random_page_cost: 1.1
+      effective_io_concurrency: 200
+      work_mem: 8MB
+      min_wal_size: 2GB
+      max_wal_size: 8GB
+
+# etcd 配置
+etcd:
+  # 生产环境 etcd 资源
+  resources:
+    limits:
+      cpu: 1
+      memory: 1Gi
+    requests:
+      cpu: 500m
+      memory: 512Mi
+  
+  # 生产环境 etcd 存储
+  persistence:
+    enabled: true
+    size: 20Gi
+
+# HAProxy 配置
+haproxy:
+  # 生产环境高可用 HAProxy
+  replicas: 3
+  
+  resources:
+    limits:
+      cpu: 1
+      memory: 1Gi
+    requests:
+      cpu: 500m
+      memory: 512Mi
+  
+  # 生产环境负载均衡器服务
+  service:
+    type: LoadBalancer
+    annotations:
+      service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+      service.beta.kubernetes.io/aws-load-balancer-internal: "true"
+
+# 集群配置
+cluster:
+  # 生产环境建议至少3个节点
+  replicas: 5
+
+# 安全配置
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 999
+  fsGroup: 999
+
+securityContext:
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: false
+  runAsNonRoot: true
+  runAsUser: 999
+
+# 节点亲和性 - 确保 pods 分布在不同节点
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+    - weight: 100
+      podAffinityTerm:
+        labelSelector:
+          matchExpressions:
+          - key: app.kubernetes.io/name
+            operator: In
+            values:
+            - patroni-cluster
+        topologyKey: kubernetes.io/hostname
+
+# 监控配置
+monitoring:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    namespace: "monitoring"
+    interval: 15s
+    scrapeTimeout: 10s

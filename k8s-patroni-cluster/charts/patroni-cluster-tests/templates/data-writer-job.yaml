@@ -1,0 +1,71 @@
+{{- if .Values.dataWriter.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "patroni-cluster-tests.fullname" . }}-data-writer
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "patroni-cluster-tests.labels" . | nindent 4 }}
+    app.kubernetes.io/component: data-writer
+spec:
+  parallelism: {{ .Values.dataWriter.replicas }}
+  completions: {{ .Values.dataWriter.replicas }}
+  template:
+    metadata:
+      labels:
+        {{- include "patroni-cluster-tests.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: data-writer
+      annotations:
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "patroni-cluster-tests.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      restartPolicy: Never
+      containers:
+      - name: data-writer
+        image: "{{ .Values.dataWriter.image.repository }}:{{ .Values.dataWriter.image.tag }}"
+        imagePullPolicy: {{ .Values.dataWriter.image.pullPolicy }}
+        command:
+        - /bin/sh
+        - -c
+        - |
+          apk add --no-cache gcc musl-dev postgresql-dev
+          pip install -r /scripts/requirements.txt
+          python /scripts/data_writer.py
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: HOSTNAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        resources:
+          {{- toYaml .Values.dataWriter.resources | nindent 10 }}
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+        securityContext:
+          {{- toYaml .Values.securityContext | nindent 10 }}
+      volumes:
+      - name: scripts
+        configMap:
+          name: {{ include "patroni-cluster-tests.fullname" . }}-data-writer
+          defaultMode: 0755
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

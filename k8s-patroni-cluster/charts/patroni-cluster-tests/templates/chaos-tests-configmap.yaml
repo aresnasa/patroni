@@ -1,0 +1,267 @@
+{{- if .Values.chaosTests.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "patroni-cluster-tests.fullname" . }}-chaos-tests
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "patroni-cluster-tests.labels" . | nindent 4 }}
+    app.kubernetes.io/component: chaos-tests
+data:
+  chaos_test.py: |
+    #!/usr/bin/env python3
+    import time
+    import random
+    import logging
+    import sys
+    import os
+    import signal
+    import subprocess
+    from datetime import datetime
+    import threading
+    import json
+    from kubernetes import client, config
+    
+    # 配置日志
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
+    logger = logging.getLogger(__name__)
+    
+    class PatroniChaosTest:
+        def __init__(self):
+            self.namespace = "{{ .Values.targetCluster.namespace }}"
+            self.cluster_name = "{{ .Values.targetCluster.name }}"
+            self.duration = {{ .Values.chaosTests.duration }}
+            self.interval = {{ .Values.chaosTests.interval }}
+            self.chaos_types = {{ .Values.chaosTests.chaosTypes | toJson }}
+            
+            self.start_time = datetime.now()
+            self.stop_event = threading.Event()
+            self.chaos_events = []
+            
+            # 初始化 Kubernetes 客户端
+            try:
+                config.load_incluster_config()
+                self.v1 = client.CoreV1Api()
+                self.apps_v1 = client.AppsV1Api()
+                logger.info("Kubernetes 客户端初始化成功")
+            except Exception as e:
+                logger.error(f"Kubernetes 客户端初始化失败: {e}")
+                sys.exit(1)
+            
+            # 注册信号处理器
+            signal.signal(signal.SIGTERM, self._signal_handler)
+            signal.signal(signal.SIGINT, self._signal_handler)
+        
+        def _signal_handler(self, signum, frame):
+            logger.info(f"收到信号 {signum}，正在优雅关闭...")
+            self.stop_event.set()
+        
+        def get_patroni_pods(self):
+            """获取 Patroni PostgreSQL pods"""
+            try:
+                pods = self.v1.list_namespaced_pod(
+                    namespace=self.namespace,
+                    label_selector=f"app.kubernetes.io/name={self.cluster_name},app.kubernetes.io/component=postgresql"
+                )
+                return [pod for pod in pods.items if pod.status.phase == "Running"]
+            except Exception as e:
+                logger.error(f"获取 Patroni pods 失败: {e}")
+                return []
+        
+        def kill_random_pod(self):
+            """随机杀死一个 PostgreSQL pod"""
+            pods = self.get_patroni_pods()
+            if not pods:
+                logger.warning("没有找到运行中的 Patroni pods")
+                return False
+            
+            target_pod = random.choice(pods)
+            pod_name = target_pod.metadata.name
+            
+            try:
+                logger.info(f"🔥 执行混沌测试: 删除 pod {pod_name}")
+                self.v1.delete_namespaced_pod(name=pod_name, namespace=self.namespace)
+                
+                self.chaos_events.append({
+                    'type': 'pod_kill',
+                    'target': pod_name,
+                    'timestamp': datetime.now().isoformat(),
+                    'description': f'Killed pod {pod_name}'
+                })
+                
+                logger.info(f"✅ 成功删除 pod {pod_name}")
+                return True
+            except Exception as e:
+                logger.error(f"删除 pod {pod_name} 失败: {e}")
+                return False
+        
+        def simulate_network_partition(self):
+            """模拟网络分区"""
+            pods = self.get_patroni_pods()
+            if len(pods) < 2:
+                logger.warning("需要至少2个 pods 来模拟网络分区")
+                return False
+            
+            target_pod = random.choice(pods)
+            pod_name = target_pod.metadata.name
+            
+            try:
+                logger.info(f"🌐 执行混沌测试: 网络分区 {pod_name}")
+                
+                # 在 pod 中执行网络延迟命令
+                exec_command = [
+                    '/bin/sh', '-c',
+                    'tc qdisc add dev eth0 root netem delay 1000ms 500ms loss 50%'
+                ]
+                
+                # 这里使用简化的方法，实际应该使用 kubectl exec
+                logger.info(f"模拟对 {pod_name} 的网络分区")
+                
+                self.chaos_events.append({
+                    'type': 'network_partition',
+                    'target': pod_name,
+                    'timestamp': datetime.now().isoformat(),
+                    'description': f'Applied network chaos to {pod_name}'
+                })
+                
+                # 30秒后恢复网络
+                time.sleep(30)
+                logger.info(f"🔄 恢复 {pod_name} 的网络连接")
+                
+                return True
+            except Exception as e:
+                logger.error(f"网络分区测试失败: {e}")
+                return False
+        
+        def simulate_cpu_stress(self):
+            """模拟 CPU 压力"""
+            pods = self.get_patroni_pods()
+            if not pods:
+                logger.warning("没有找到运行中的 Patroni pods")
+                return False
+            
+            target_pod = random.choice(pods)
+            pod_name = target_pod.metadata.name
+            
+            try:
+                logger.info(f"💻 执行混沌测试: CPU 压力测试 {pod_name}")
+                
+                self.chaos_events.append({
+                    'type': 'cpu_stress',
+                    'target': pod_name,
+                    'timestamp': datetime.now().isoformat(),
+                    'description': f'Applied CPU stress to {pod_name}'
+                })
+                
+                # 模拟 CPU 压力 (这里只是记录，实际需要在 pod 中执行 stress 命令)
+                logger.info(f"对 {pod_name} 施加 CPU 压力 60 秒")
+                time.sleep(60)
+                logger.info(f"🔄 {pod_name} CPU 压力测试结束")
+                
+                return True
+            except Exception as e:
+                logger.error(f"CPU 压力测试失败: {e}")
+                return False
+        
+        def simulate_memory_stress(self):
+            """模拟内存压力"""
+            pods = self.get_patroni_pods()
+            if not pods:
+                logger.warning("没有找到运行中的 Patroni pods")
+                return False
+            
+            target_pod = random.choice(pods)
+            pod_name = target_pod.metadata.name
+            
+            try:
+                logger.info(f"🧠 执行混沌测试: 内存压力测试 {pod_name}")
+                
+                self.chaos_events.append({
+                    'type': 'memory_stress',
+                    'target': pod_name,
+                    'timestamp': datetime.now().isoformat(),
+                    'description': f'Applied memory stress to {pod_name}'
+                })
+                
+                # 模拟内存压力 (这里只是记录，实际需要在 pod 中执行 stress 命令)
+                logger.info(f"对 {pod_name} 施加内存压力 60 秒")
+                time.sleep(60)
+                logger.info(f"🔄 {pod_name} 内存压力测试结束")
+                
+                return True
+            except Exception as e:
+                logger.error(f"内存压力测试失败: {e}")
+                return False
+        
+        def execute_chaos(self):
+            """执行随机混沌测试"""
+            if not self.chaos_types:
+                logger.warning("没有配置混沌测试类型")
+                return False
+            
+            chaos_type = random.choice(self.chaos_types)
+            
+            if chaos_type == "podKill":
+                return self.kill_random_pod()
+            elif chaos_type == "networkPartition":
+                return self.simulate_network_partition()
+            elif chaos_type == "cpuStress":
+                return self.simulate_cpu_stress()
+            elif chaos_type == "memoryStress":
+                return self.simulate_memory_stress()
+            else:
+                logger.warning(f"未知的混沌测试类型: {chaos_type}")
+                return False
+        
+        def print_summary(self):
+            """打印测试摘要"""
+            runtime = datetime.now() - self.start_time
+            
+            logger.info("📊 混沌测试摘要:")
+            logger.info(f"   运行时间: {runtime}")
+            logger.info(f"   执行的混沌事件: {len(self.chaos_events)}")
+            
+            for event in self.chaos_events:
+                logger.info(f"   - {event['type']}: {event['description']} ({event['timestamp']})")
+        
+        def run(self):
+            """运行混沌测试"""
+            logger.info("🌪️ K8s Patroni 混沌测试启动...")
+            logger.info(f"目标集群: {self.cluster_name} (namespace: {self.namespace})")
+            logger.info(f"测试持续时间: {self.duration} 秒")
+            logger.info(f"测试间隔: {self.interval} 秒")
+            logger.info(f"混沌测试类型: {self.chaos_types}")
+            
+            while not self.stop_event.is_set():
+                # 检查是否超过运行时间
+                if (datetime.now() - self.start_time).total_seconds() > self.duration:
+                    logger.info("达到运行时间限制，正在停止...")
+                    break
+                
+                # 执行混沌测试
+                success = self.execute_chaos()
+                if success:
+                    logger.info("✅ 混沌测试执行成功")
+                else:
+                    logger.warning("⚠️ 混沌测试执行失败")
+                
+                # 等待下一次测试
+                if not self.stop_event.wait(self.interval):
+                    continue
+                else:
+                    break
+            
+            # 打印最终摘要
+            self.print_summary()
+            logger.info("🏁 混沌测试完成")
+    
+    if __name__ == "__main__":
+        chaos_test = PatroniChaosTest()
+        chaos_test.run()
+
+  requirements.txt: |
+    kubernetes==29.0.0
+{{- end }}

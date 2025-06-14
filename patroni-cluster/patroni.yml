@@ -1,0 +1,80 @@
+scope: postgres-cluster
+name: ${PATRONI_NAME}
+
+restapi:
+  listen: ${PATRONI_RESTAPI_LISTEN}
+  connect_address: ${PATRONI_RESTAPI_CONNECT_ADDRESS}
+
+etcd3:
+  hosts: ${PATRONI_ETCD3_HOSTS}
+
+bootstrap:
+  dcs:
+    ttl: 30
+    loop_wait: 10
+    retry_timeout: 30
+    maximum_lag_on_failover: 1048576
+    master_start_timeout: 300
+    synchronous_mode: false
+    check_timeline: false
+    postgresql:
+      use_pg_rewind: true
+      use_slots: true
+      parameters:
+        wal_level: replica
+        hot_standby: "on"
+        max_connections: 100
+        max_worker_processes: 8
+        wal_keep_size: 128MB
+        max_wal_senders: 10
+        max_replication_slots: 10
+        checkpoint_timeout: 30
+        wal_log_hints: "on"
+        archive_mode: "on"
+        archive_command: "test ! -f /var/lib/postgresql/archive/%f && cp %p /var/lib/postgresql/archive/%f"
+        logging_collector: "on"
+        log_truncate_on_rotation: "on"
+        log_filename: "postgresql-%w.log"
+        log_rotation_age: 1d
+        log_rotation_size: 0
+        shared_preload_libraries: ""
+
+  initdb:
+    - encoding: UTF8
+    - data-checksums
+
+  pg_hba:
+    - host replication replicator 0.0.0.0/0 md5
+    - host all all 0.0.0.0/0 md5
+
+  users:
+    admin:
+      password: ${PATRONI_admin_PASSWORD}
+      options:
+        - ${PATRONI_admin_OPTIONS}
+
+postgresql:
+  listen: ${PATRONI_POSTGRESQL_LISTEN}
+  connect_address: ${PATRONI_POSTGRESQL_CONNECT_ADDRESS}
+  data_dir: ${PATRONI_POSTGRESQL_DATA_DIR}
+  bin_dir: /usr/local/bin
+  pgpass: ${PATRONI_POSTGRESQL_PGPASS}
+  authentication:
+    replication:
+      username: ${PATRONI_REPLICATION_USERNAME}
+      password: ${PATRONI_REPLICATION_PASSWORD}
+    superuser:
+      username: ${PATRONI_SUPERUSER_USERNAME}
+      password: ${PATRONI_SUPERUSER_PASSWORD}
+
+  parameters:
+    unix_socket_directories: '/var/run/postgresql'
+
+watchdog:
+  mode: off
+
+tags:
+    nofailover: false
+    noloadbalance: false
+    clonefrom: false
+    nosync: false

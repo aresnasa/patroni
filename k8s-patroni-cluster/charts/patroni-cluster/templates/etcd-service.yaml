@@ -1,0 +1,43 @@
+{{- if .Values.etcd.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "patroni-cluster.fullname" . }}-etcd
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "patroni-cluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: etcd
+spec:
+  type: {{ .Values.etcd.service.type }}
+  ports:
+  - port: {{ .Values.etcd.service.clientPort }}
+    targetPort: client
+    protocol: TCP
+    name: client
+  selector:
+    {{- include "patroni-cluster.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: etcd
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "patroni-cluster.fullname" . }}-etcd-headless
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "patroni-cluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: etcd
+spec:
+  clusterIP: None
+  ports:
+  - port: {{ .Values.etcd.service.clientPort }}
+    targetPort: client
+    protocol: TCP
+    name: client
+  - port: {{ .Values.etcd.service.peerPort }}
+    targetPort: peer
+    protocol: TCP
+    name: peer
+  selector:
+    {{- include "patroni-cluster.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: etcd
+{{- end }}

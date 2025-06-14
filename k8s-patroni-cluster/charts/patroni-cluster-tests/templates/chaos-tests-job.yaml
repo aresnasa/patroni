@@ -1,0 +1,65 @@
+{{- if .Values.chaosTests.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "patroni-cluster-tests.fullname" . }}-chaos-tests
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "patroni-cluster-tests.labels" . | nindent 4 }}
+    app.kubernetes.io/component: chaos-tests
+spec:
+  template:
+    metadata:
+      labels:
+        {{- include "patroni-cluster-tests.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: chaos-tests
+      annotations:
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "patroni-cluster-tests.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      restartPolicy: Never
+      containers:
+      - name: chaos-tests
+        image: "{{ .Values.chaosTests.image.repository }}:{{ .Values.chaosTests.image.tag }}"
+        imagePullPolicy: {{ .Values.chaosTests.image.pullPolicy }}
+        command:
+        - /bin/sh
+        - -c
+        - |
+          apk add --no-cache gcc musl-dev libffi-dev openssl-dev
+          pip install -r /scripts/requirements.txt
+          python /scripts/chaos_test.py
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        resources:
+          {{- toYaml .Values.chaosTests.resources | nindent 10 }}
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+        securityContext:
+          {{- toYaml .Values.securityContext | nindent 10 }}
+      volumes:
+      - name: scripts
+        configMap:
+          name: {{ include "patroni-cluster-tests.fullname" . }}-chaos-tests
+          defaultMode: 0755
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

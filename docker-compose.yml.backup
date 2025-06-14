@@ -14,7 +14,8 @@ networks:
 
 services:
     etcd1: &etcd
-        image: ${PATRONI_TEST_IMAGE:-patroni}
+        #image: ${PATRONI_TEST_IMAGE:-patroni}
+        image: bitnami/etcd:latest
         networks: [ demo ]
         environment:
             ETCD_LISTEN_PEER_URLS: http://0.0.0.0:2380
@@ -40,14 +41,15 @@ services:
         command: etcd --name etcd3 --initial-advertise-peer-urls http://etcd3:2380
 
     haproxy:
-        image: ${PATRONI_TEST_IMAGE:-patroni}
+        #image: ${PATRONI_TEST_IMAGE:-patroni}
+        image: haproxy:lts-alpine3.22
         networks: [ demo ]
         env_file: docker/patroni.env
         hostname: haproxy
         container_name: demo-haproxy
         ports:
-            - "5000:5000"
-            - "5001:5001"
+            - "5002:5000"
+            - "5003:5001"
         command: haproxy
         environment: &haproxy_env
             ETCDCTL_ENDPOINTS: http://etcd1:2379,http://etcd2:2379,http://etcd3:2379
@@ -55,7 +57,8 @@ services:
             PATRONI_SCOPE: demo
 
     patroni1:
-        image: ${PATRONI_TEST_IMAGE:-patroni}
+        #image: ${PATRONI_TEST_IMAGE:-patroni}
+        image: ongres/patroni:latest
         networks: [ demo ]
         env_file: docker/patroni.env
         hostname: patroni1
@@ -65,7 +68,8 @@ services:
             PATRONI_NAME: patroni1
 
     patroni2:
-        image: ${PATRONI_TEST_IMAGE:-patroni}
+        #image: ${PATRONI_TEST_IMAGE:-patroni}
+        image: ongres/patroni:latest
         networks: [ demo ]
         env_file: docker/patroni.env
         hostname: patroni2
@@ -75,7 +79,8 @@ services:
             PATRONI_NAME: patroni2
 
     patroni3:
-        image: ${PATRONI_TEST_IMAGE:-patroni}
+        #image: ${PATRONI_TEST_IMAGE:-patroni}
+        image: ongres/patroni:latest
         networks: [ demo ]
         env_file: docker/patroni.env
         hostname: patroni3

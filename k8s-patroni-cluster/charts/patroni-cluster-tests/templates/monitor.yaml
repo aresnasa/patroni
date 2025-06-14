@@ -1,0 +1,299 @@
+{{- if .Values.monitoring.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "patroni-cluster-tests.fullname" . }}-monitor
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "patroni-cluster-tests.labels" . | nindent 4 }}
+    app.kubernetes.io/component: monitor
+data:
+  monitor.py: |
+    #!/usr/bin/env python3
+    import requests
+    import time
+    import json
+    import logging
+    from datetime import datetime
+    import signal
+    import sys
+    import subprocess
+    
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    logger = logging.getLogger(__name__)
+    
+    class ClusterMonitor:
+        def __init__(self):
+            self.namespace = "{{ .Values.targetCluster.namespace }}"
+            self.cluster_name = "{{ .Values.targetCluster.name }}"
+            self.interval = {{ .Values.monitoring.interval }}
+            self.running = True
+            
+        def signal_handler(self, signum, frame):
+            logger.info("收到停止信号，正在关闭监控...")
+            self.running = False
+            
+        def run_kubectl(self, cmd):
+            try:
+                result = subprocess.run(
+                    f"kubectl {cmd}",
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                return result.returncode == 0, result.stdout, result.stderr
+            except Exception:
+                return False, "", ""
+                
+        def get_pod_status(self):
+            success, stdout, stderr = self.run_kubectl(
+                f"-n {self.namespace} get pods -l app.kubernetes.io/component=postgresql -o json"
+            )
+            
+            if not success:
+                return []
+                
+            try:
+                data = json.loads(stdout)
+                pods = []
+                for item in data.get('items', []):
+                    pod_info = {
+                        'name': item['metadata']['name'],
+                        'status': item['status']['phase'],
+                        'ready': False,
+                        'restarts': 0
+                    }
+                    
+                    # 检查容器状态
+                    for container in item['status'].get('containerStatuses', []):
+                        if container['name'] == 'postgresql':
+                            pod_info['ready'] = container['ready']
+                            pod_info['restarts'] = container['restartCount']
+                            break
+                            
+                    pods.append(pod_info)
+                return pods
+            except Exception as e:
+                logger.error(f"解析Pod状态失败: {e}")
+                return []
+                
+        def get_patroni_status(self, pod_name):
+            try:
+                url = f"http://{pod_name}.{self.cluster_name}-postgresql-headless.{self.namespace}.svc.cluster.local:8008/patroni"
+                response = requests.get(url, timeout=5)
+                if response.status_code == 200:
+                    return response.json()
+            except Exception:
+                pass
+            return None
+            
+        def get_cluster_overview(self):
+            pods = self.get_pod_status()
+            cluster_info = {
+                'timestamp': datetime.now().isoformat(),
+                'total_pods': len(pods),
+                'ready_pods': sum(1 for p in pods if p['ready']),
+                'leader': None,
+                'replicas': [],
+                'pod_details': pods
+            }
+            
+            # 获取Patroni状态
+            for pod in pods:
+                if pod['ready']:
+                    patroni_status = self.get_patroni_status(pod['name'])
+                    if patroni_status:
+                        role = patroni_status.get('role', 'unknown')
+                        state = patroni_status.get('state', 'unknown')
+                        
+                        pod_detail = {
+                            'name': pod['name'],
+                            'role': role,
+                            'state': state,
+                            'timeline': patroni_status.get('timeline'),
+                            'lag': patroni_status.get('lag', 0) if role == 'replica' else None
+                        }
+                        
+                        if role == 'leader':
+                            cluster_info['leader'] = pod_detail
+                        elif role == 'replica':
+                            cluster_info['replicas'].append(pod_detail)
+                            
+            return cluster_info
+            
+        def get_etcd_status(self):
+            etcd_info = {
+                'healthy_nodes': 0,
+                'total_nodes': 0,
+                'leader': None
+            }
+            
+            for i in range(3):
+                etcd_pod = f"{self.cluster_name}-etcd-{i}"
+                try:
+                    url = f"http://{etcd_pod}.{self.cluster_name}-etcd-headless.{self.namespace}.svc.cluster.local:2379/health"
+                    response = requests.get(url, timeout=3)
+                    if response.status_code == 200:
+                        etcd_info['healthy_nodes'] += 1
+                    etcd_info['total_nodes'] += 1
+                except Exception:
+                    etcd_info['total_nodes'] += 1
+                    
+            return etcd_info
+            
+        def get_haproxy_stats(self):
+            try:
+                url = f"http://{self.cluster_name}-haproxy.{self.namespace}.svc.cluster.local:8404/stats?stats;csv"
+                response = requests.get(url, timeout=5, auth=('admin', 'admin123'))
+                if response.status_code == 200:
+                    lines = response.text.strip().split('\n')
+                    stats = {}
+                    for line in lines[1:]:  # 跳过标题行
+                        if line.strip():
+                            fields = line.split(',')
+                            if len(fields) > 17:
+                                backend = fields[0]
+                                server = fields[1]
+                                status = fields[17]
+                                if backend not in stats:
+                                    stats[backend] = {}
+                                stats[backend][server] = status
+                    return stats
+            except Exception:
+                pass
+            return {}
+            
+        def print_status(self, cluster_info, etcd_info, haproxy_stats):
+            print("\n" + "="*80)
+            print(f"📊 Patroni 集群监控 - {cluster_info['timestamp']}")
+            print("="*80)
+            
+            # PostgreSQL 集群状态
+            print(f"🐘 PostgreSQL 集群状态:")
+            print(f"   总节点: {cluster_info['total_pods']}")
+            print(f"   就绪节点: {cluster_info['ready_pods']}")
+            
+            if cluster_info['leader']:
+                leader = cluster_info['leader']
+                print(f"   👑 主节点: {leader['name']} (timeline: {leader.get('timeline', 'N/A')})")
+            else:
+                print(f"   ❌ 无主节点")
+                
+            if cluster_info['replicas']:
+                print(f"   📚 副本节点:")
+                for replica in cluster_info['replicas']:
+                    lag_info = f", lag: {replica['lag']}B" if replica['lag'] is not None else ""
+                    print(f"      - {replica['name']} (timeline: {replica.get('timeline', 'N/A')}{lag_info})")
+            else:
+                print(f"   ❌ 无副本节点")
+                
+            # etcd 状态
+            print(f"\n🗄️ etcd 集群状态:")
+            print(f"   健康节点: {etcd_info['healthy_nodes']}/{etcd_info['total_nodes']}")
+            
+            # HAProxy 状态
+            if haproxy_stats:
+                print(f"\n⚖️ HAProxy 负载均衡状态:")
+                for backend, servers in haproxy_stats.items():
+                    if backend in ['primary', 'replica', 'all']:
+                        print(f"   {backend}:")
+                        for server, status in servers.items():
+                            if server != 'BACKEND':
+                                status_icon = "✅" if status == "UP" else "❌"
+                                print(f"      - {server}: {status_icon} {status}")
+                                
+            # Pod 详细状态
+            print(f"\n📋 Pod 详细状态:")
+            for pod in cluster_info['pod_details']:
+                status_icon = "✅" if pod['ready'] else "❌"
+                restart_info = f" (restarts: {pod['restarts']})" if pod['restarts'] > 0 else ""
+                print(f"   {status_icon} {pod['name']}: {pod['status']}{restart_info}")
+                
+            print("="*80)
+            
+        def run(self):
+            signal.signal(signal.SIGTERM, self.signal_handler)
+            signal.signal(signal.SIGINT, self.signal_handler)
+            
+            logger.info("🔍 开始集群监控...")
+            logger.info(f"目标集群: {self.cluster_name} (namespace: {self.namespace})")
+            logger.info(f"监控间隔: {self.interval}秒")
+            
+            while self.running:
+                try:
+                    cluster_info = self.get_cluster_overview()
+                    etcd_info = self.get_etcd_status()
+                    haproxy_stats = self.get_haproxy_stats()
+                    
+                    self.print_status(cluster_info, etcd_info, haproxy_stats)
+                    
+                    # 保存监控数据
+                    monitoring_data = {
+                        'cluster': cluster_info,
+                        'etcd': etcd_info,
+                        'haproxy': haproxy_stats
+                    }
+                    
+                    with open('/tmp/monitoring_data.json', 'w') as f:
+                        json.dump(monitoring_data, f, indent=2)
+                        
+                except Exception as e:
+                    logger.error(f"监控过程中发生错误: {e}")
+                    
+                time.sleep(self.interval)
+                
+            logger.info("🏁 集群监控结束")
+            
+    if __name__ == "__main__":
+        monitor = ClusterMonitor()
+        monitor.run()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "patroni-cluster-tests.fullname" . }}-monitor
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "patroni-cluster-tests.labels" . | nindent 4 }}
+    app.kubernetes.io/component: monitor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "patroni-cluster-tests.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: monitor
+  template:
+    metadata:
+      labels:
+        {{- include "patroni-cluster-tests.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: monitor
+    spec:
+      serviceAccountName: {{ include "patroni-cluster-tests.serviceAccountName" . }}
+      containers:
+      - name: monitor
+        image: "{{ .Values.monitoring.image.repository }}:{{ .Values.monitoring.image.tag }}"
+        imagePullPolicy: {{ .Values.monitoring.image.pullPolicy }}
+        command:
+        - /bin/sh
+        - -c
+        - |
+          apk add --no-cache curl
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          mv kubectl /usr/local/bin/
+          pip install requests
+          python3 /scripts/monitor.py
+        volumeMounts:
+        - name: script
+          mountPath: /scripts
+        resources:
+          {{- toYaml .Values.monitoring.resources | nindent 10 }}
+        securityContext:
+          {{- toYaml .Values.securityContext | nindent 10 }}
+      volumes:
+      - name: script
+        configMap:
+          name: {{ include "patroni-cluster-tests.fullname" . }}-monitor
+          defaultMode: 0755
+{{- end }}
