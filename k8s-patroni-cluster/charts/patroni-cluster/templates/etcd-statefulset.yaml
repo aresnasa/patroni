@@ -43,22 +43,22 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.name
-        - name: ETCD_DATA_DIR
-          value: /etcd-data
-        - name: ETCD_LISTEN_CLIENT_URLS
-          value: http://0.0.0.0:2379
-        - name: ETCD_LISTEN_PEER_URLS
-          value: http://0.0.0.0:2380
-        - name: ETCD_ADVERTISE_CLIENT_URLS
-          value: http://$(ETCD_NAME).{{ include "patroni-cluster.fullname" . }}-etcd-headless.{{ .Values.global.namespace }}.svc.cluster.local:2379
         - name: ETCD_INITIAL_ADVERTISE_PEER_URLS
           value: http://$(ETCD_NAME).{{ include "patroni-cluster.fullname" . }}-etcd-headless.{{ .Values.global.namespace }}.svc.cluster.local:2380
+        - name: ETCD_ADVERTISE_CLIENT_URLS
+          value: http://$(ETCD_NAME).{{ include "patroni-cluster.fullname" . }}-etcd-headless.{{ .Values.global.namespace }}.svc.cluster.local:2379
+        - name: ETCD_LISTEN_PEER_URLS
+          value: http://0.0.0.0:2380
+        - name: ETCD_LISTEN_CLIENT_URLS
+          value: http://0.0.0.0:2379
         - name: ETCD_INITIAL_CLUSTER
           value: {{ include "patroni-cluster.fullname" . }}-etcd-0=http://{{ include "patroni-cluster.fullname" . }}-etcd-0.{{ include "patroni-cluster.fullname" . }}-etcd-headless.{{ .Values.global.namespace }}.svc.cluster.local:2380,{{ include "patroni-cluster.fullname" . }}-etcd-1=http://{{ include "patroni-cluster.fullname" . }}-etcd-1.{{ include "patroni-cluster.fullname" . }}-etcd-headless.{{ .Values.global.namespace }}.svc.cluster.local:2380,{{ include "patroni-cluster.fullname" . }}-etcd-2=http://{{ include "patroni-cluster.fullname" . }}-etcd-2.{{ include "patroni-cluster.fullname" . }}-etcd-headless.{{ .Values.global.namespace }}.svc.cluster.local:2380
         - name: ETCD_INITIAL_CLUSTER_STATE
           value: new
         - name: ETCD_INITIAL_CLUSTER_TOKEN
-          value: {{ .Values.postgresql.patroni.scope }}
+          value: patroni-cluster
+        - name: ALLOW_NONE_AUTHENTICATION
+          value: "yes"
         livenessProbe:
           httpGet:
             path: /health
@@ -75,7 +75,7 @@ spec:
           {{- toYaml .Values.etcd.resources | nindent 10 }}
         volumeMounts:
         - name: etcd-data
-          mountPath: /etcd-data
+          mountPath: /bitnami/etcd
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

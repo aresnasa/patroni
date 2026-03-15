@@ -14,7 +14,7 @@ spec:
   restartPolicy: Never
   containers:
   - name: test
-    image: postgres:15-alpine
+    image: postgres:16-alpine
     command:
     - /bin/sh
     - -c
@@ -26,8 +26,7 @@ spec:
       echo "Test 1: Checking PostgreSQL pods..."
       apk add --no-cache curl
       
-      REPLICAS={{ .Values.cluster.replicas }}
-      for ((i=0; i<REPLICAS; i++)); do
+      for i in 0 1 2; do
         pod_name="{{ include "patroni-cluster.fullname" . }}-postgresql-$i"
         echo "Checking $pod_name..."
         

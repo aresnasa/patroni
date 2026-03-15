@@ -3,12 +3,16 @@ global:
   storageClass: ""
   namespace: patroni-cluster
 
+# Namespace Configuration
+namespace:
+  create: false  # Set to true if you want Helm to create the namespace
+
 # PostgreSQL Configuration
 postgresql:
-  version: "16"
+  version: "15"
   image:
     repository: postgres
-    tag: "16-alpine"
+    tag: "15-alpine"
     pullPolicy: IfNotPresent
   
   # Database configuration
@@ -20,10 +24,10 @@ postgresql:
   
   # Patroni configuration
   patroni:
-    version: "4.0.6"
+    version: "latest"
     image:
-      repository: patroni/patroni
-      tag: "4.0.6"
+      repository: ongres/patroni
+      tag: "latest"
       pullPolicy: IfNotPresent
     
     # Cluster settings
@@ -77,8 +81,8 @@ postgresql:
 etcd:
   enabled: true
   image:
-    repository: quay.io/coreos/etcd
-    tag: "v3.5.15"
+    repository: bitnami/etcd
+    tag: "latest"
     pullPolicy: IfNotPresent
   
   replicas: 3
@@ -105,49 +109,53 @@ etcd:
     clientPort: 2379
     peerPort: 2380
 
-# HAProxy Configuration
-haproxy:
+# Load Balancer Configuration (using Kubernetes Services)
+loadBalancer:
   enabled: true
-  image:
-    repository: haproxy
-    tag: "3.0-alpine"
-    pullPolicy: IfNotPresent
   
-  replicas: 2
-  
-  # Resource configuration
-  resources:
-    limits:
-      cpu: 500m
-      memory: 512Mi
-    requests:
-      cpu: 100m
-      memory: 256Mi
-  
-  # Service configuration
-  service:
+  # Primary service (read-write, connects to leader only)
+  primary:
+    enabled: true
     type: LoadBalancer
-    ports:
-      primary: 5000
-      replica: 5001
-      all: 5002
-      stats: 7000
-    annotations: {}
-  
-  # HAProxy configuration
-  config:
-    maxconn: 1000
-    timeout:
-      connect: 30s
-      client: 60s
-      server: 60s
+    port: 5432
+    annotations:
+      # AWS Load Balancer annotations (uncomment for AWS)
+      # service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+      # service.beta.kubernetes.io/aws-load-balancer-backend-protocol: "tcp"
+      
+      # GCP Load Balancer annotations (uncomment for GCP)
+      # cloud.google.com/load-balancer-type: "External"
+      
+      # Azure Load Balancer annotations (uncomment for Azure)
+      # service.beta.kubernetes.io/azure-load-balancer-internal: "false"
     
-    # Stats configuration
-    stats:
+    # Health check configuration
+    healthCheck:
       enabled: true
-      username: admin
-      password: admin123
-      uri: /stats
+      path: "/primary"
+      port: 8008
+  
+  # Read-only service (connects to replica pods only)
+  readonly:
+    enabled: true
+    type: ClusterIP
+    port: 5433
+    annotations: {}
+    
+    # Health check configuration
+    healthCheck:
+      enabled: true
+      path: "/replica"
+      port: 8008
+  
+  # All nodes service (connects to any available pod)
+  all:
+    enabled: true
+    type: ClusterIP
+    port: 5434
+    annotations: {}
+    
+    # No health check needed for this service
 
 # Cluster Configuration
 cluster:
@@ -207,5 +215,5 @@ tests:
   enabled: true
   image:
     repository: postgres
-    tag: "16-alpine"
+    tag: "15-alpine"
     pullPolicy: IfNotPresent

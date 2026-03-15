@@ -142,29 +142,34 @@ data:
                     
             return etcd_info
             
-        def get_haproxy_stats(self):
+        def get_service_status(self):
             try:
-                url = f"http://{self.cluster_name}-haproxy.{self.namespace}.svc.cluster.local:8404/stats?stats;csv"
-                response = requests.get(url, timeout=5, auth=('admin', 'admin123'))
-                if response.status_code == 200:
-                    lines = response.text.strip().split('\n')
-                    stats = {}
-                    for line in lines[1:]:  # 跳过标题行
-                        if line.strip():
-                            fields = line.split(',')
-                            if len(fields) > 17:
-                                backend = fields[0]
-                                server = fields[1]
-                                status = fields[17]
-                                if backend not in stats:
-                                    stats[backend] = {}
-                                stats[backend][server] = status
-                    return stats
+                # Check load balancer services status
+                services_info = {
+                    'primary_service': False,
+                    'readonly_service': False,
+                    'all_service': False
+                }
+                
+                services = [
+                    (f"{self.cluster_name}-primary", 'primary_service'),
+                    (f"{self.cluster_name}-readonly", 'readonly_service'),
+                    (f"{self.cluster_name}-all", 'all_service')
+                ]
+                
+                for service_name, key in services:
+                    success, stdout, stderr = self.run_kubectl(
+                        f"-n {self.namespace} get service {service_name} -o jsonpath='{{.status.loadBalancer.ingress}}'"
+                    )
+                    if success:
+                        services_info[key] = True
+                        
+                return services_info
             except Exception:
                 pass
             return {}
             
-        def print_status(self, cluster_info, etcd_info, haproxy_stats):
+        def print_status(self, cluster_info, etcd_info, service_info):
             print("\n" + "="*80)
             print(f"📊 Patroni 集群监控 - {cluster_info['timestamp']}")
             print("="*80)
@@ -192,16 +197,16 @@ data:
             print(f"\n🗄️ etcd 集群状态:")
             print(f"   健康节点: {etcd_info['healthy_nodes']}/{etcd_info['total_nodes']}")
             
-            # HAProxy 状态
-            if haproxy_stats:
-                print(f"\n⚖️ HAProxy 负载均衡状态:")
-                for backend, servers in haproxy_stats.items():
-                    if backend in ['primary', 'replica', 'all']:
-                        print(f"   {backend}:")
-                        for server, status in servers.items():
-                            if server != 'BACKEND':
-                                status_icon = "✅" if status == "UP" else "❌"
-                                print(f"      - {server}: {status_icon} {status}")
+            # Load Balancer 服务状态
+            if service_info:
+                print(f"\n⚖️ Load Balancer 服务状态:")
+                primary_status = "✅ 运行" if service_info.get('primary_service') else "❌ 未就绪"
+                readonly_status = "✅ 运行" if service_info.get('readonly_service') else "❌ 未就绪"
+                all_status = "✅ 运行" if service_info.get('all_service') else "❌ 未就绪"
+                
+                print(f"   primary (读写): {primary_status}")
+                print(f"   readonly (只读): {readonly_status}")
+                print(f"   all (所有节点): {all_status}")
                                 
             # Pod 详细状态
             print(f"\n📋 Pod 详细状态:")
@@ -224,15 +229,15 @@ data:
                 try:
                     cluster_info = self.get_cluster_overview()
                     etcd_info = self.get_etcd_status()
-                    haproxy_stats = self.get_haproxy_stats()
+                    service_info = self.get_service_status()
                     
-                    self.print_status(cluster_info, etcd_info, haproxy_stats)
+                    self.print_status(cluster_info, etcd_info, service_info)
                     
                     # 保存监控数据
                     monitoring_data = {
                         'cluster': cluster_info,
                         'etcd': etcd_info,
-                        'haproxy': haproxy_stats
+                        'services': service_info
                     }
                     
                     with open('/tmp/monitoring_data.json', 'w') as f:

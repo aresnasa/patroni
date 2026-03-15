@@ -64,6 +64,8 @@ spec:
               fieldPath: status.podIP
         - name: PATRONI_CONFIGURATION
           value: /etc/patroni/patroni.yml
+        
+        # Kubernetes integration for Patroni
         - name: PATRONI_KUBERNETES_POD_IP
           valueFrom:
             fieldRef:
@@ -71,7 +73,15 @@ spec:
         - name: PATRONI_KUBERNETES_NAMESPACE
           value: {{ .Values.global.namespace }}
         - name: PATRONI_KUBERNETES_LABELS
-          value: '{app.kubernetes.io/name: {{ include "patroni-cluster.name" . }}, app.kubernetes.io/component: postgresql}'
+          value: '{app.kubernetes.io/name: {{ include "patroni-cluster.name" . }}, app.kubernetes.io/component: postgresql, role: "{role}"}'
+        - name: PATRONI_KUBERNETES_USE_ENDPOINTS
+          value: "false"
+        - name: PATRONI_KUBERNETES_ROLE_LABEL
+          value: "role"
+        - name: PATRONI_KUBERNETES_SCOPE_LABEL
+          value: "cluster-name"
+        
+        # Database credentials
         - name: PATRONI_SUPERUSER_USERNAME
           value: {{ .Values.postgresql.username }}
         - name: PATRONI_SUPERUSER_PASSWORD
@@ -97,6 +107,15 @@ spec:
               key: superuser-password
         - name: POSTGRES_DB
           value: {{ .Values.postgresql.database }}
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          echo "Waiting for etcd cluster to be ready..."
+          while ! nc -z {{ include "patroni-cluster.fullname" . }}-etcd-0.{{ include "patroni-cluster.fullname" . }}-etcd-headless.{{ .Values.global.namespace }}.svc.cluster.local 2379; do
+            sleep 1
+          done
+          echo "etcd cluster is ready, starting Patroni..."
+          exec patroni /etc/patroni/patroni.yml
         livenessProbe:
           httpGet:
             path: /liveness

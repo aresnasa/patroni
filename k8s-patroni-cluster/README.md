@@ -25,8 +25,9 @@
 │           └─────────────────┼─────────────────┘                  │
 │                            │                                     │
 │  ┌─────────────────────────────────────────────────────────────┐│
-│  │              HAProxy 负载均衡器 (v3.0)                      ││
-│  │  5000 (主库) │ 5001 (副本) │ 5002 (所有) │ 7000 (统计)        ││
+│  │          Kubernetes Load Balancer Services                  ││
+│  │  primary (5432) │ readonly (5433) │ all (5434)              ││
+│  │  主库读写服务     │  只读副本服务     │  所有节点服务           ││
 │  └─────────────────────────────────────────────────────────────┘│
 │                            │                                     │
 │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐         │
@@ -172,18 +173,20 @@ kubectl get pods -n patroni-cluster -l app.kubernetes.io/component=haproxy
 ### 连接数据库
 
 ```bash
-# 获取 HAProxy 服务信息
-kubectl get svc -n patroni-cluster patroni-cluster-haproxy
+# 获取负载均衡服务信息
+kubectl get svc -n patroni-cluster -l app.kubernetes.io/component=loadbalancer
 
-# 端口转发到本地
-kubectl port-forward -n patroni-cluster svc/patroni-cluster-haproxy 5432:5000
-
-# 连接主库 (读写)
+# 端口转发到本地 - 主库连接 (读写)
+kubectl port-forward -n patroni-cluster svc/patroni-cluster-primary 5432:5432
 psql -h localhost -p 5432 -U postgres -d postgres
 
-# 连接副本 (只读)
-kubectl port-forward -n patroni-cluster svc/patroni-cluster-haproxy 5433:5001
+# 端口转发到本地 - 副本连接 (只读)
+kubectl port-forward -n patroni-cluster svc/patroni-cluster-readonly 5433:5433
 psql -h localhost -p 5433 -U postgres -d postgres
+
+# 端口转发到本地 - 所有节点连接
+kubectl port-forward -n patroni-cluster svc/patroni-cluster-all 5434:5434
+psql -h localhost -p 5434 -U postgres -d postgres
 ```
 
 ### 扩缩容操作

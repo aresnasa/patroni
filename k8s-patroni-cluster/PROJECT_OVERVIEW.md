@@ -56,7 +56,7 @@ k8s-patroni-cluster/
 | **PostgreSQL** | 16-alpine | 3 | 主数据库服务 |
 | **Patroni** | 4.0.6 | 3 | 高可用管理 |
 | **etcd** | v3.5.15 | 3 | 分布式配置存储 |
-| **HAProxy** | 3.0-alpine | 2 | 负载均衡器 |
+| **Load Balancer** | K8s Services | 3 | 原生负载均衡 |
 
 ### 测试组件 (patroni-cluster-tests)
 

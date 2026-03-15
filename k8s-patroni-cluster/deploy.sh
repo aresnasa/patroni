@@ -45,6 +45,7 @@ usage() {
   test            部署测试套件
   all             部署集群和测试套件
   status          检查集群状态
+  info            显示集群连接信息
   logs            查看日志
   cleanup         清理所有资源
   help            显示此帮助信息
@@ -60,6 +61,7 @@ usage() {
   $0 test                       # 部署测试套件
   $0 all -n my-namespace        # 部署到指定命名空间
   $0 status                     # 检查集群状态
+  $0 info                       # 显示连接信息
   $0 cleanup                    # 清理所有资源
 
 EOF
@@ -91,7 +93,49 @@ check_prerequisites() {
 
 create_namespace() {
     log_info "创建命名空间: $NAMESPACE"
-    kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+    
+    # 检查命名空间是否已存在
+    if kubectl get namespace "$NAMESPACE" &> /dev/null; then
+        log_warn "命名空间 $NAMESPACE 已存在"
+        
+        # 检查是否有 Helm 管理标签
+        HELM_MANAGED=$(kubectl get namespace "$NAMESPACE" -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}' 2>/dev/null || echo "")
+        
+        if [ "$HELM_MANAGED" != "Helm" ]; then
+            log_warn "命名空间不是由 Helm 管理，添加必要的标签和注解..."
+            
+            # 添加 Helm 标签和注解
+            kubectl label namespace "$NAMESPACE" \
+                app.kubernetes.io/managed-by=Helm \
+                app.kubernetes.io/name="$CLUSTER_NAME" \
+                app.kubernetes.io/instance="$CLUSTER_NAME" \
+                --overwrite
+            
+            kubectl annotate namespace "$NAMESPACE" \
+                meta.helm.sh/release-name="$CLUSTER_NAME" \
+                meta.helm.sh/release-namespace="$NAMESPACE" \
+                --overwrite
+            
+            log_info "✅ 命名空间标签和注解已更新"
+        fi
+    else
+        # 创建新的命名空间
+        cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: $NAMESPACE
+  labels:
+    name: $NAMESPACE
+    app.kubernetes.io/name: $CLUSTER_NAME
+    app.kubernetes.io/instance: $CLUSTER_NAME
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: $CLUSTER_NAME
+    meta.helm.sh/release-namespace: $NAMESPACE
+EOF
+        log_info "✅ 命名空间 $NAMESPACE 创建成功"
+    fi
 }
 
 deploy_cluster() {
@@ -119,10 +163,9 @@ deploy_cluster() {
         kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=patroni-cluster,app.kubernetes.io/component=etcd
     }
     
-    log_info "等待 HAProxy 就绪..."
-    kubectl wait --for=condition=available deployment -l app.kubernetes.io/name=patroni-cluster,app.kubernetes.io/component=haproxy -n "$NAMESPACE" --timeout="$WAIT_TIMEOUT" || {
-        log_warn "等待超时，检查 HAProxy 状态..."
-        kubectl get deployment -n "$NAMESPACE" -l app.kubernetes.io/name=patroni-cluster,app.kubernetes.io/component=haproxy
+    log_info "等待服务就绪..."
+    kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=postgresql -n "$NAMESPACE" --timeout="$WAIT_TIMEOUT" || {
+        log_warn "PostgreSQL 服务等待超时"
     }
     
     log_info "✅ Patroni 集群部署完成"
@@ -158,8 +201,8 @@ check_status() {
     kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/component=postgresql -o wide 2>/dev/null || log_warn "PostgreSQL pods 不存在"
     
     echo ""
-    log_info "=== HAProxy 状态 ==="
-    kubectl get deployment,pods -n "$NAMESPACE" -l app.kubernetes.io/component=haproxy 2>/dev/null || log_warn "HAProxy 不存在"
+    log_info "=== 负载均衡服务状态 ==="
+    kubectl get services -n "$NAMESPACE" -l app.kubernetes.io/component=loadbalancer 2>/dev/null || log_warn "负载均衡服务不存在"
     
     echo ""
     log_info "=== 服务状态 ==="
@@ -197,8 +240,8 @@ show_logs() {
         "postgresql"|"patroni")
             kubectl logs -n "$NAMESPACE" -l app.kubernetes.io/component=postgresql --tail=50
             ;;
-        "haproxy")
-            kubectl logs -n "$NAMESPACE" -l app.kubernetes.io/component=haproxy --tail=50
+        "services")
+            kubectl get services -n "$NAMESPACE" -l app.kubernetes.io/component=loadbalancer
             ;;
         "tests")
             kubectl logs -n "$NAMESPACE" -l app.kubernetes.io/name=patroni-cluster-tests --tail=100
@@ -210,15 +253,15 @@ show_logs() {
             log_info "=== PostgreSQL 日志 ==="
             kubectl logs -n "$NAMESPACE" -l app.kubernetes.io/component=postgresql --tail=20
             echo ""
-            log_info "=== HAProxy 日志 ==="
-            kubectl logs -n "$NAMESPACE" -l app.kubernetes.io/component=haproxy --tail=20
+            log_info "=== 负载均衡服务状态 ==="
+            kubectl get services -n "$NAMESPACE" -l app.kubernetes.io/component=loadbalancer
             echo ""
             log_info "=== 测试日志 ==="
             kubectl logs -n "$NAMESPACE" -l app.kubernetes.io/name=patroni-cluster-tests --tail=20
             ;;
         *)
             log_error "未知组件: $component"
-            log_info "支持的组件: etcd, postgresql, haproxy, tests, all"
+            log_info "支持的组件: etcd, postgresql, services, tests, all"
             exit 1
             ;;
     esac
@@ -254,6 +297,61 @@ run_tests() {
     helm test "$CLUSTER_NAME" -n "$NAMESPACE"
 }
 
+show_info() {
+    log_info "显示集群连接信息..."
+    
+    echo ""
+    log_info "=== Patroni PostgreSQL 集群连接信息 ==="
+    echo ""
+    
+    # 检查集群是否存在
+    if ! kubectl get namespace "$NAMESPACE" &>/dev/null; then
+        log_error "命名空间 $NAMESPACE 不存在"
+        return 1
+    fi
+    
+    # 显示服务信息
+    echo "📋 集群服务:"
+    kubectl get services -n "$NAMESPACE" -l app.kubernetes.io/component=loadbalancer --no-headers 2>/dev/null | while read -r name type cluster_ip external_ip port_info age; do
+        echo "  • $name ($type): $cluster_ip"
+    done
+    echo ""
+    
+    # 显示连接命令
+    echo "🔌 本地连接命令:"
+    echo ""
+    echo "主库连接 (读写):"
+    echo "  kubectl port-forward -n $NAMESPACE svc/$CLUSTER_NAME-primary 5432:5432"
+    echo "  psql -h localhost -p 5432 -U postgres -d postgres"
+    echo ""
+    echo "只读连接:"
+    echo "  kubectl port-forward -n $NAMESPACE svc/$CLUSTER_NAME-readonly 5433:5433"
+    echo "  psql -h localhost -p 5433 -U postgres -d postgres"
+    echo ""
+    echo "所有节点连接:"
+    echo "  kubectl port-forward -n $NAMESPACE svc/$CLUSTER_NAME-all 5434:5434"
+    echo "  psql -h localhost -p 5434 -U postgres -d postgres"
+    echo ""
+    
+    # 显示集群状态
+    echo "📊 集群状态:"
+    pg_replicas=$(kubectl get statefulset "$CLUSTER_NAME-postgresql" -n "$NAMESPACE" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+    pg_desired=$(kubectl get statefulset "$CLUSTER_NAME-postgresql" -n "$NAMESPACE" -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "3")
+    etcd_replicas=$(kubectl get statefulset "$CLUSTER_NAME-etcd" -n "$NAMESPACE" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+    etcd_desired=$(kubectl get statefulset "$CLUSTER_NAME-etcd" -n "$NAMESPACE" -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "3")
+    
+    echo "  • PostgreSQL: $pg_replicas/$pg_desired 副本就绪"
+    echo "  • etcd: $etcd_replicas/$etcd_desired 副本就绪"
+    echo ""
+    
+    # 显示管理命令
+    echo "⚙️ 管理命令:"
+    echo "  检查状态: ./deploy.sh status"
+    echo "  查看日志: ./deploy.sh logs"
+    echo "  运行测试: ./quick-test.sh"
+    echo "  清理资源: ./deploy.sh cleanup"
+}
+
 # 主逻辑
 main() {
     local command=""
@@ -261,7 +359,7 @@ main() {
     # 解析参数
     while [[ $# -gt 0 ]]; do
         case $1 in
-            deploy|test|all|status|logs|cleanup|help)
+            deploy|test|all|status|logs|cleanup|info|help)
                 command="$1"
                 shift
                 ;;
@@ -320,6 +418,9 @@ main() {
             ;;
         "cleanup")
             cleanup
+            ;;
+        "info")
+            show_info
             ;;
         "run-tests")
             run_tests

@@ -1,0 +1,89 @@
+{{- if .Values.loadBalancer.enabled }}
+{{- if .Values.loadBalancer.primary.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "patroni-cluster.fullname" . }}-primary
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "patroni-cluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: loadbalancer
+    service-type: primary
+  {{- with .Values.loadBalancer.primary.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.loadBalancer.primary.type }}
+  ports:
+  - port: {{ .Values.loadBalancer.primary.port }}
+    targetPort: postgresql
+    protocol: TCP
+    name: postgresql
+  selector:
+    {{- include "patroni-cluster.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: postgresql
+    # This service only routes to the primary node
+    # Patroni will set this label on the leader pod
+    role: primary
+{{- end }}
+
+{{- if .Values.loadBalancer.readonly.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "patroni-cluster.fullname" . }}-readonly
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "patroni-cluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: loadbalancer
+    service-type: readonly
+  {{- with .Values.loadBalancer.readonly.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.loadBalancer.readonly.type }}
+  ports:
+  - port: {{ .Values.loadBalancer.readonly.port }}
+    targetPort: postgresql
+    protocol: TCP
+    name: postgresql
+  selector:
+    {{- include "patroni-cluster.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: postgresql
+    # This service only routes to replica nodes
+    role: replica
+  sessionAffinity: None
+{{- end }}
+
+{{- if .Values.loadBalancer.all.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "patroni-cluster.fullname" . }}-all
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "patroni-cluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: loadbalancer
+    service-type: all
+  {{- with .Values.loadBalancer.all.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.loadBalancer.all.type }}
+  ports:
+  - port: {{ .Values.loadBalancer.all.port }}
+    targetPort: postgresql
+    protocol: TCP
+    name: postgresql
+  selector:
+    {{- include "patroni-cluster.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: postgresql
+  sessionAffinity: None
+{{- end }}
+{{- end }}

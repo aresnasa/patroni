@@ -32,11 +32,12 @@ data:
             self.interval = {{ .Values.consistencyCheck.interval }}
             self.running = True
             
-            self.nodes = [
-                f"{self.cluster_name}-postgresql-0.{self.cluster_name}-postgresql-headless.{self.namespace}.svc.cluster.local",
-                f"{self.cluster_name}-postgresql-1.{self.cluster_name}-postgresql-headless.{self.namespace}.svc.cluster.local",
-                f"{self.cluster_name}-postgresql-2.{self.cluster_name}-postgresql-headless.{self.namespace}.svc.cluster.local"
-            ]
+            # 动态生成节点列表
+            self.replicas = 3  # 默认副本数，可以从环境变量或配置获取
+            self.nodes = []
+            for i in range(self.replicas):
+                node_host = f"{self.cluster_name}-postgresql-{i}.{self.cluster_name}-postgresql-headless.{self.namespace}.svc.cluster.local"
+                self.nodes.append(node_host)
             
         def signal_handler(self, signum, frame):
             logger.info("收到停止信号，正在关闭一致性检查...")

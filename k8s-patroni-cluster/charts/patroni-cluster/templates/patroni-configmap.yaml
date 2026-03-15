@@ -17,7 +17,18 @@ data:
       connect_address: ${POD_IP}:8008
     
     etcd:
-      hosts: {{ include "patroni-cluster.fullname" . }}-etcd.{{ .Values.global.namespace }}.svc.cluster.local:2379
+      hosts: {{ include "patroni-cluster.fullname" . }}-etcd-0.{{ include "patroni-cluster.fullname" . }}-etcd-headless.{{ .Values.global.namespace }}.svc.cluster.local:2379,{{ include "patroni-cluster.fullname" . }}-etcd-1.{{ include "patroni-cluster.fullname" . }}-etcd-headless.{{ .Values.global.namespace }}.svc.cluster.local:2379,{{ include "patroni-cluster.fullname" . }}-etcd-2.{{ include "patroni-cluster.fullname" . }}-etcd-headless.{{ .Values.global.namespace }}.svc.cluster.local:2379
+    
+    # Kubernetes integration for automatic label management
+    kubernetes:
+      labels:
+        role: "{role}"
+      pod_ip: ${POD_IP}
+      ports:
+      - name: postgresql
+        port: 5432
+      - name: patroni
+        port: 8008
     
     bootstrap:
       dcs:

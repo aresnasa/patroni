@@ -7,6 +7,13 @@ global:
 
 # PostgreSQL 配置
 postgresql:
+  # PostgreSQL 版本配置 (与 docker-compose.yml 保持一致)
+  version: "15"
+  image:
+    repository: postgres
+    tag: "15-alpine"
+    pullPolicy: IfNotPresent
+    
   # 生产环境建议使用强密码
   password: "SecurePassword123!"
   replicationPassword: "ReplicationPassword456!"
@@ -44,44 +51,52 @@ postgresql:
 
 # etcd 配置
 etcd:
+  # 生产环境 etcd 副本数
+  replicas: 3
+  
   # 生产环境 etcd 资源
   resources:
     limits:
       cpu: 1
-      memory: 1Gi
+      memory: 2Gi
     requests:
       cpu: 500m
-      memory: 512Mi
+      memory: 1Gi
   
   # 生产环境 etcd 存储
   persistence:
     enabled: true
-    size: 20Gi
+    size: 50Gi
 
-# HAProxy 配置
-haproxy:
-  # 生产环境高可用 HAProxy
-  replicas: 3
+# Load Balancer 配置 (使用 Kubernetes Services)
+loadBalancer:
+  enabled: true
   
-  resources:
-    limits:
-      cpu: 1
-      memory: 1Gi
-    requests:
-      cpu: 500m
-      memory: 512Mi
-  
-  # 生产环境负载均衡器服务
-  service:
+  # 主库服务配置
+  primary:
+    enabled: true
     type: LoadBalancer
+    port: 5432
     annotations:
       service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
       service.beta.kubernetes.io/aws-load-balancer-internal: "true"
+  
+  # 只读服务配置
+  readonly:
+    enabled: true
+    type: ClusterIP
+    port: 5433
+  
+  # 所有节点服务配置
+  all:
+    enabled: true
+    type: ClusterIP
+    port: 5434
 
 # 集群配置
 cluster:
-  # 生产环境建议至少3个节点
-  replicas: 5
+  # 生产环境标准3节点配置
+  replicas: 3
 
 # 安全配置
 podSecurityContext:

@@ -25,8 +25,11 @@ data:
     
     class DataWriter:
         def __init__(self):
-            self.host = "{{ .Values.targetCluster.name }}-haproxy.{{ .Values.targetCluster.namespace }}.svc.cluster.local"
-            self.port = 5000
+            # Use the new primary service for write operations
+            self.host = "{{ .Values.targetCluster.name }}-primary.{{ .Values.targetCluster.namespace }}.svc.cluster.local"
+            self.port = 5432
+            self.readonly_host = "{{ .Values.targetCluster.name }}-readonly.{{ .Values.targetCluster.namespace }}.svc.cluster.local"
+            self.readonly_port = 5433
             self.username = "{{ .Values.targetCluster.postgresql.username }}"
             self.password = "{{ .Values.targetCluster.postgresql.password }}"
             self.database = "{{ .Values.targetCluster.postgresql.database }}"
