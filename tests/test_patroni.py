@@ -34,6 +34,12 @@ def mock_import(*args, **kwargs):
 
 
 def mock_import2(*args, **kwargs):
+    ret = Mock()
+    ret.__version__ = '2.8.3.dev1 a b c'
+    return ret
+
+
+def mock_import3(*args, **kwargs):
     if args[0] == 'psycopg2':
         raise ImportError
     ret = Mock()
@@ -138,9 +144,13 @@ class TestPatroni(unittest.TestCase):
         def mock_signal(signo, handler):
             handler(signo, None)
 
-        with patch('signal.signal', mock_signal):
-            with patch('os.waitpid', Mock(side_effect=[(1, 0), (0, 0)])):
+        with patch('signal.signal', mock_signal), patch('os.kill') as mock_kill:
+            with patch('os.waitpid', Mock(side_effect=[(1, 0), (0, 0)])), \
+                 patch('patroni.__main__.logger') as mock_logger:
                 _main()
+                mock_kill.assert_called_with(mock_process.return_value.pid, signal.SIGTERM)
+                if os.name != 'nt':
+                    mock_logger.info.assert_called_with('Reaped pid=%s, exit status=%s', 1, 0)
             with patch('os.waitpid', Mock(side_effect=OSError)):
                 _main()
 
@@ -292,6 +302,8 @@ class TestPatroni(unittest.TestCase):
         with patch('builtins.__import__', mock_import):
             self.assertIsNone(check_psycopg())
         with patch('builtins.__import__', mock_import2):
+            self.assertIsNone(check_psycopg())
+        with patch('builtins.__import__', mock_import3):
             self.assertRaises(SystemExit, check_psycopg)
 
     def test_ensure_unique_name(self):

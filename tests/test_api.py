@@ -103,7 +103,7 @@ class MockHa(object):
         return False
 
     @staticmethod
-    def reinitialize(_):
+    def reinitialize(force=False, from_leader=False):
         return 'reinitialize'
 
     @staticmethod
@@ -211,6 +211,8 @@ class TestRestApiHandler(unittest.TestCase):
         MockRestApiServer(RestApiHandler, 'GET /replica?lag=1M')
         MockRestApiServer(RestApiHandler, 'GET /replica?lag=10MB')
         MockRestApiServer(RestApiHandler, 'GET /replica?lag=10485760')
+        MockRestApiServer(RestApiHandler, 'GET /replica?lag=replication_state=streaming')
+        MockRestApiServer(RestApiHandler, 'GET /replica?lag=10485760&replication_state=streaming')
         MockRestApiServer(RestApiHandler, 'GET /read-only')
         with patch.object(RestApiHandler, 'get_postgresql_status', Mock(return_value={})):
             MockRestApiServer(RestApiHandler, 'GET /replica')
@@ -231,6 +233,7 @@ class TestRestApiHandler(unittest.TestCase):
         with patch.object(RestApiHandler, 'get_postgresql_status',
                           Mock(return_value={'role': PostgresqlRole.REPLICA})):
             MockRestApiServer(RestApiHandler, 'GET /asynchronous')
+            MockRestApiServer(RestApiHandler, 'GET /replica?replication_state=streaming')
         with patch.object(MockHa, 'is_leader', Mock(return_value=True)):
             MockRestApiServer(RestApiHandler, 'GET /replica')
             MockRestApiServer(RestApiHandler, 'GET /read-only-sync')
@@ -349,7 +352,9 @@ class TestRestApiHandler(unittest.TestCase):
         mock_dcs.ttl.return_value = PropertyMock(30)
         self.assertIsNotNone(MockRestApiServer(RestApiHandler, 'GET /liveness HTTP/1.0'))
 
-    def test_do_GET_readiness(self):
+    @patch.object(MockPatroni, 'dcs')
+    def test_do_GET_readiness(self, mock_dcs):
+        mock_dcs.cluster.status.last_lsn = 5
         MockRestApiServer(RestApiHandler, 'GET /readiness HTTP/1.0')
         with patch.object(MockHa, 'is_leader', Mock(return_value=True)):
             MockRestApiServer(RestApiHandler, 'GET /readiness HTTP/1.0')
@@ -377,7 +382,7 @@ class TestRestApiHandler(unittest.TestCase):
             response_mock.assert_called_with(503)
 
         # DCS not available
-        MockPatroni.dcs.cluster = None
+        mock_dcs.cluster = None
         with patch_query(None, None, None), \
                 patch.object(RestApiHandler, '_write_status_code_only') as response_mock:
             # Failsafe active
@@ -540,7 +545,8 @@ class TestRestApiHandler(unittest.TestCase):
         self.assertIsNotNone(MockRestApiServer(RestApiHandler, request))
 
     def test_do_POST_reinitialize(self):
-        request = 'POST /reinitialize HTTP/1.0' + self._authorization + '\nContent-Length: 15\n\n{"force": true}'
+        request = 'POST /reinitialize HTTP/1.0' + self._authorization + \
+                  '\nContent-Length: 36\n\n{"force": true, "from_leader": true}'
         MockRestApiServer(RestApiHandler, request)
         with patch.object(MockHa, 'reinitialize', Mock(return_value=None)):
             MockRestApiServer(RestApiHandler, request)
@@ -811,3 +817,21 @@ class TestRestApiServer(unittest.TestCase):
                 patch.object(MockConnection, 'query') as mock_query:
             self.srv.query('SELECT 1')
             mock_query.assert_called_once_with('SELECT 1')
+
+    def test_construct_server_tokens(self):
+        #
+        # Test cases (case insensitive values):
+        # 1. 'original' server token - should return empty string
+        self.assertEqual(self.srv.construct_server_tokens('original'), '')
+        self.assertEqual(self.srv.construct_server_tokens('oriGINal'), '')
+
+        # 2. 'productonly' server token - should return 'Patroni'
+        self.assertEqual(self.srv.construct_server_tokens('productonly'), 'Patroni')
+        self.assertEqual(self.srv.construct_server_tokens('prodUCTOnly'), 'Patroni')
+
+        # 3. 'minimal' server token - should return 'Patroni/$version'
+        self.assertEqual(self.srv.construct_server_tokens('minimal'), 'Patroni/0.00')
+        self.assertEqual(self.srv.construct_server_tokens('miNIMal'), 'Patroni/0.00')
+
+        # 4. Invalid server token - should exhibit 'original' behaviour and return an empty string.
+        self.assertEqual(self.srv.construct_server_tokens('foobar'), '')

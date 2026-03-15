@@ -119,6 +119,16 @@ class RestApiHandler(BaseHTTPRequestHandler):
         self.__start_time: float = 0.0
         self.path_query: Dict[str, List[str]] = {}
 
+    def version_string(self) -> str:
+        """Override the default version string to return the server header as specified in the configuration.
+
+        If the server header is not set, then it returns the default version string of the HTTP server.
+
+        :return: ``Server`` version string, which is either the server header or the default version string
+            from the :class:`BaseHTTPRequestHandler`.
+        """
+        return self.server.server_header or super().version_string()
+
     def _write_status_code_only(self, status_code: int) -> None:
         """Write a response that is composed only of the HTTP status.
 
@@ -258,6 +268,8 @@ class RestApiHandler(BaseHTTPRequestHandler):
                     * ``lag``: only accept replication lag up to ``lag``. Accepts either an :class:`int`, which
                         represents lag in bytes, or a :class:`str` representing lag in human-readable format (e.g.
                         ``10MB``).
+                    * ``replication_state``: only return HTTP status ``200`` if the node's state matches the
+                        requested one (e.g. "streaming")
                     * Any custom parameter: will attempt to match them against node tags.
 
                 * HTTP status ``200``: if up and running as a standby and without ``noloadbalance`` tag.
@@ -323,8 +335,14 @@ class RestApiHandler(BaseHTTPRequestHandler):
             max_replica_lag = sys.maxsize
         is_lagging = leader_optime and leader_optime > replayed_location + max_replica_lag
 
+        wanted_replication_state = self.path_query.get('replication_state', [None])[0]
+        matches_replication_state = response.get('replication_state') == wanted_replication_state \
+            if wanted_replication_state else True
+
         replica_status_code = 200 if not patroni.noloadbalance and not is_lagging and \
-            response.get('role') == PostgresqlRole.REPLICA and response.get('state') == PostgresqlState.RUNNING else 503
+            response.get('role') == PostgresqlRole.REPLICA and \
+            response.get('state') == PostgresqlState.RUNNING and \
+            matches_replication_state else 503
 
         if not cluster and response.get('pause'):
             leader_status_code = 200 if response.get('role') in (PostgresqlRole.PRIMARY,
@@ -723,6 +741,15 @@ class RestApiHandler(BaseHTTPRequestHandler):
         metrics.append("# TYPE patroni_is_paused gauge")
         metrics.append("patroni_is_paused{0} {1}".format(labels, int(postgres.get('pause', 0))))
 
+        metrics.append("# HELP patroni_postgres_state Numeric representation of Postgres state.")
+        # Generate description of all state values for metrics documentation
+        state_descriptions = [f"{state.index}={state.name.lower()}" for state in PostgresqlState]
+        metrics.append(f"# Values: {', '.join(state_descriptions)}")
+        metrics.append("# TYPE patroni_postgres_state gauge")
+        current_state = postgres['state']
+        state_value = current_state.index if isinstance(current_state, PostgresqlState) else -1
+        metrics.append(f"patroni_postgres_state{labels} {state_value}")
+
         self.write_response(200, '\n'.join(metrics) + '\n', content_type='text/plain')
 
     def _read_json_content(self, body_is_optional: bool = False) -> Optional[Dict[Any, Any]]:
@@ -946,7 +973,7 @@ class RestApiHandler(BaseHTTPRequestHandler):
             # failed to parse the json
             return
         if request:
-            logger.debug("received restart request: {0}".format(request))
+            logger.debug("received restart request: %s", request)
 
         if global_config.from_cluster(cluster).is_paused and 'schedule' in request:
             self.write_response(status_code, "Can't schedule restart in the paused state")
@@ -1051,6 +1078,7 @@ class RestApiHandler(BaseHTTPRequestHandler):
         The request body may contain a JSON dictionary with the following key:
 
             * ``force``: ``True`` if we want to cancel an already running task in order to reinit a replica.
+            * ``from_leader``: ``True`` if we want to reinit a replica and get basebackup from the leader node.
 
         Response HTTP status codes:
 
@@ -1063,8 +1091,9 @@ class RestApiHandler(BaseHTTPRequestHandler):
             logger.debug('received reinitialize request: %s', request)
 
         force = isinstance(request, dict) and parse_bool(request.get('force')) or False
+        from_leader = isinstance(request, dict) and parse_bool(request.get('from_leader')) or False
 
-        data = self.server.patroni.ha.reinitialize(force)
+        data = self.server.patroni.ha.reinitialize(force, from_leader)
         if data is None:
             status_code = 200
             data = 'reinitialize started'
@@ -1480,6 +1509,33 @@ class RestApiServer(ThreadingMixIn, HTTPServer, Thread):
         self.reload_config(config)
         self.daemon = True
 
+    def construct_server_tokens(self, token_config: str) -> str:
+        """Construct the value for the ``Server`` HTTP header based on *server_tokens*.
+
+        :param server_tokens: the value of ``restapi.server_tokens`` configuration option.
+
+        :returns: a string to be used as the value of ``Server`` HTTP header.
+        """
+        token = token_config.lower()
+        logger.debug('restapi.server_tokens is set to "%s".', token_config)
+
+        # If 'original' is set, we do not modify the Server header.
+        # This is useful for compatibility with existing setups that expect the original header.
+        if token == 'original':
+            return ""
+
+        # If 'productonly', or 'minimal' is set, we construct the header accordingly.
+        if token == 'productonly':  # Show only the product name, without versions.
+            return 'Patroni'
+        elif token == 'minimal':    # Show only the product name and version, without PostgreSQL version.
+            return f'Patroni/{self.patroni.version}'
+        else:
+            # Token is not valid (one of 'original', 'productonly', 'minimal') so report a warning and
+            # return an empty string.
+            logger.warning('restapi.server_tokens is set to "%s". Patroni will not modify the Server header. '
+                           'Valid values are: "Minimal", "ProductOnly".', token_config)
+            return ""
+
     def query(self, sql: str, *params: Any) -> List[Tuple[Any, ...]]:
         """Execute *sql* query with *params* and optionally return results.
 
@@ -1857,6 +1913,9 @@ class RestApiServer(ThreadingMixIn, HTTPServer, Thread):
         if TYPE_CHECKING:  # pragma: no cover
             assert isinstance(self.__listen, str)
         self.connection_string = uri(self.__protocol, config.get('connect_address') or self.__listen, 'patroni')
+
+        # Define the Server header response using the server_tokens option.
+        self.server_header = self.construct_server_tokens(config.get('server_tokens', 'original'))
 
     def handle_error(self, request: Union[socket.socket, Tuple[bytes, socket.socket]],
                      client_address: Tuple[str, int]) -> None:

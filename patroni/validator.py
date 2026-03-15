@@ -13,7 +13,7 @@ from typing import Any, cast, Dict, Iterator, List, Optional as OptionalType, Tu
 
 from .collections import CaseInsensitiveSet, EMPTY_DICT
 from .dcs import dcs_modules
-from .exceptions import ConfigParseError
+from .exceptions import ConfigParseError, PatroniAssertionError
 from .log import type_logformat
 from .utils import data_directory_is_empty, get_major_version, parse_int, split_host_port
 
@@ -173,9 +173,12 @@ def validate_host_port_list(value: List[str]) -> bool:
     :param value: list of host(s) and port items to be validated.
 
     :returns: ``True`` if all items are valid.
+
+    .. note::
+        :func:`validate_host_port` will raise an exception if validation failed.
     """
-    assert all([validate_host_port(v) for v in value]), "didn't pass the validation"
-    return True
+
+    return all(validate_host_port(v) for v in value)
 
 
 def comma_separated_host_port(string: str) -> bool:
@@ -870,7 +873,8 @@ def assert_(condition: bool, message: str = "Wrong value") -> None:
     :param condition: result of a condition to be asserted.
     :param message: message to be thrown if the condition is ``False``.
     """
-    assert condition, message
+    if not condition:
+        raise PatroniAssertionError(message)
 
 
 class IntValidator(object):
@@ -1032,7 +1036,9 @@ schema = Schema({
         Optional("allowlist_include_members"): bool,
         Optional("http_extra_headers"): dict,
         Optional("https_extra_headers"): dict,
-        Optional("request_queue_size"): IntValidator(min=0, max=4096, expected_type=int, raise_assert=True)
+        Optional("request_queue_size"): IntValidator(min=0, max=4096, expected_type=int, raise_assert=True),
+        Optional("server_tokens"): EnumValidator(('minimal', 'productonly', 'original'),
+                                                 case_sensitive=False, raise_assert=True)
     },
     Optional("bootstrap"): {
         "dcs": {
@@ -1052,6 +1058,8 @@ schema = Schema({
                     Optional("max_worker_processes"): IntValidator(0, 262143, raise_assert=True),
                 },
                 Optional("use_pg_rewind"): bool,
+                Optional("rewind"): [Or(str, dict)],
+                Optional("basebackup"): [Or(str, dict)],
                 Optional("pg_hba"): [str],
                 Optional("pg_ident"): [str],
                 Optional("pg_ctl_timeout"): IntValidator(min=0, raise_assert=True),
@@ -1172,7 +1180,9 @@ schema = Schema({
         Optional("pg_hba"): [str],
         Optional("pg_ident"): [str],
         Optional("pg_ctl_timeout"): IntValidator(min=0, raise_assert=True),
-        Optional("use_pg_rewind"): bool
+        Optional("use_pg_rewind"): bool,
+        Optional("rewind"): [Or(str, dict)],
+        Optional("basebackup"): [Or(str, dict)],
     },
     Optional("watchdog"): {
         Optional("mode"): validate_watchdog_mode,

@@ -96,8 +96,12 @@ class TestKVCache(BaseTestEtcd3):
 
     @patch.object(urllib3.PoolManager, 'urlopen', mock_urlopen)
     @patch.object(Etcd3Client, 'watchprefix', Mock(return_value=urllib3.response.HTTPResponse()))
+    @patch.object(urllib3.response.HTTPResponse, 'read_chunked',
+                  Mock(return_value=[b'{"result":{"canceled":true}}']))
     def test__build_cache(self):
-        self.kv_cache._build_cache()
+        with patch('patroni.dcs.etcd3.logger') as mock_logger:
+            self.kv_cache._build_cache()
+            mock_logger.info.assert_called_once_with('Watch request canceled')
 
     def test__do_watch(self):
         self.client.watchprefix = Mock(return_value=False)
@@ -198,8 +202,8 @@ class TestPatroniEtcd3Client(BaseTestEtcd3):
         response.content = '{"error":{"grpc_code":0,"message":"","http_code":400}}'
         try:
             self.client._handle_server_response(response)
-        except Unknown as e:
-            self.assertEqual(e.as_dict(), {'code': 2, 'codeText': 'OK', 'error': u'', 'status': 400})
+        except Etcd3ClientError as e:
+            self.assertEqual(e.as_dict(), {'code': 0, 'codeText': 'OK', 'error': u'', 'status': 400})
 
     @patch.object(urllib3.PoolManager, 'urlopen')
     def test__ensure_version_prefix(self, mock_urlopen):
